@@ -1,14 +1,15 @@
-# Kova
+# Kova (Linux)
 
-Terminal Mac ultra-rapide en Rust + Metal.
+Fork Linux du terminal [Kova](https://github.com/ddaydd/kova) (originalement macOS avec Metal + AppKit + CoreText), porté vers **winit + wgpu + FreeType + fontconfig**.
 
 ## Stack
 
-- **Rust** — langage principal
-- **Metal** — rendu GPU natif macOS
-- **AppKit** — fenêtre et events (via `objc2`)
-- **CoreText** — glyph shaping
-- **`vte`** — parsing séquences VT
+- **Rust** (edition 2024) — langage unique
+- **wgpu** — rendu GPU (Vulkan/OpenGL)
+- **winit** — fenêtre et events (X11/Wayland)
+- **FreeType + fontconfig** — rasterisation et découverte de polices
+- **`vte`** — parsing séquences VT/ANSI
+- **arboard** — clipboard X11/Wayland
 
 ## Architecture
 
@@ -16,49 +17,49 @@ Terminal Mac ultra-rapide en Rust + Metal.
 - Un PTY par terminal pane
 - Atlas de glyphes sur GPU
 
-## État
+## Prérequis
 
-Voir `roadmap.md` pour le détail des versions et l'avancement.
+```bash
+# Ubuntu / Debian
+sudo apt install build-essential pkg-config libfreetype-dev libfontconfig1-dev libxkbcommon-dev
+```
 
-## Build
+## Build & Run
 
-- Le target directory Cargo est **global** : `~/.cargo/target` (pas `./target`)
-- Le binaire release se trouve donc dans `~/.cargo/target/release/kova`
+```bash
+cd kova-ubuntu
+
+cargo build --release        # binaire → target/release/kova
+cargo run --release          # build + run
+
+# Avec logs debug
+RUST_LOG=info cargo run --release
+```
 
 ## Installation
 
 ```bash
 cargo build --release
-# Le .app bundle est un symlink, donc il suffit de rebuild :
-# /Applications/Kova.app/Contents/MacOS/kova -> ~/.cargo/target/release/kova
+sudo cp target/release/kova /usr/local/bin/
 ```
 
-Si le bundle n'existe pas encore :
+## Config
 
-```bash
-mkdir -p /Applications/Kova.app/Contents/MacOS
-cp Info.plist /Applications/Kova.app/Contents/
-ln -sf ~/.cargo/target/release/kova /Applications/Kova.app/Contents/MacOS/kova
-```
-
-## Release
-
-`/release <major|minor|patch>` — skill Claude Code qui bump la version dans Cargo.toml + Info.plist, commit avec un message basé sur le changelog, tag `vX.Y.Z`, push, et crée une GitHub release.
+`~/.config/kova/config.toml` — voir `config.rs` pour les options disponibles.
 
 ## Logs
 
-`~/Library/Logs/Kova/kova.log` (level DEBUG par défaut, configurable via `RUST_LOG`).
+`~/.local/share/kova/kova.log` (level DEBUG par défaut, configurable via `RUST_LOG`).
 
-## Notes techniques
+## Raccourcis clavier
 
-- `notes/pty-spawn.md` — pourquoi `Command + pre_exec` plutôt que `posix_spawn` ou `fork` brut pour le controlling terminal
+Voir `keyboard-shortcuts.md`. La touche **Super** (Win) remplace **Cmd** sur macOS.
 
 ## Pièges récurrents
 
-- **Bytes vs chars** — Les cellules du terminal sont indexées par colonne (1 Cell = 1 char), mais les `String` Rust sont indexées par byte. Ne JAMAIS faire `&text[i..i+n]` sur du texte issu des cellules (contient des emoji, box-drawing, etc.). Toujours travailler avec `Vec<char>` ou itérateurs de chars quand on manipule des positions de colonnes.
+- **Bytes vs chars** — Les cellules du terminal sont indexées par colonne (1 Cell = 1 char), mais les `String` Rust sont indexées par byte. Ne JAMAIS faire `&text[i..i+n]` sur du texte issu des cellules (contient des emoji, box-drawing, etc.). Toujours travailler avec `Vec<char>` ou itérateurs de chars.
 
 ## Principes
 
-- Mac-only, pas de cross-platform
 - Performance et RAM minimale avant tout
 - Pas de feature creep : tabs, splits, config, c'est tout

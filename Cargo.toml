@@ -4,51 +4,15 @@ version = "1.1.5"
 edition = "2024"
 
 [dependencies]
-objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString", "NSNotification", "NSRunLoop", "NSThread", "NSArray", "NSDictionary", "NSValue", "NSRange", "NSData", "NSAttributedString"] }
-objc2-app-kit = { version = "0.3", features = [
-    "NSApplication",
-    "NSWindow",
-    "NSView",
-    "NSEvent",
-    "NSResponder",
-    "NSRunningApplication",
-    "NSColor",
-    "NSGraphics",
-    "NSScreen",
-    "NSMenu",
-    "NSMenuItem",
-    "NSText",
-    "NSPasteboard",
-    "NSImage",
-    "NSTrackingArea",
-    "NSCursor",
-    "NSTextInputClient",
-    "NSAlert",
-    "NSButton",
-    "NSControl",
-] }
-objc2-metal = { version = "0.3", features = [
-    "MTLDevice",
-    "MTLCommandQueue",
-    "MTLCommandBuffer",
-    "MTLRenderCommandEncoder",
-    "MTLRenderPipeline",
-    "MTLTexture",
-    "MTLBuffer",
-    "MTLLibrary",
-    "MTLRenderPass",
-    "MTLDrawable",
-    "MTLPixelFormat",
-    "MTLResource",
-    "MTLVertexDescriptor",
-    "MTLDepthStencil",
-    "MTLSampler",
-] }
-objc2-quartz-core = { version = "0.3", features = ["CALayer", "CAMetalLayer"] }
-objc2-core-foundation = { version = "0.3", features = ["CFString", "CFDictionary", "CFNumber", "CFArray"] }
-objc2-core-text = { version = "0.3", features = ["CTFont", "CTFontDescriptor", "CTLine", "CTRun"] }
-objc2-core-graphics = { version = "0.3", features = ["CGContext", "CGColorSpace", "CGBitmapContext", "CGFont", "CGPath"] }
+winit = "0.30"
+wgpu = "24"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+freetype-rs = "0.37"
+rustybuzz = "0.18"
+fontconfig = "0.7"
+arboard = "3"
+directories = "6"
 vte = "0.15"
 rustix = { version = "1.0", features = ["termios", "process", "stdio"] }
 rustix-openpty = "0.2"
@@ -59,7 +23,6 @@ bitflags = "2"
 unicode-width = "0.2"
 unicode-segmentation = "1"
 libc = "0.2"
-block2 = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"

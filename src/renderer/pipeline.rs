@@ -1,46 +1,64 @@
-use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
-use objc2_foundation::NSString;
-use objc2_metal::*;
+use super::vertex::Vertex;
 
 pub fn create_pipeline(
-    device: &ProtocolObject<dyn MTLDevice>,
-    pixel_format: MTLPixelFormat,
-) -> Retained<ProtocolObject<dyn MTLRenderPipelineState>> {
-    let shader_source = include_str!("../../shaders/terminal.metal");
-    let source = NSString::from_str(shader_source);
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    bind_group_layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let shader_source = include_str!("../../shaders/terminal.wgsl");
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("terminal_shader"),
+        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+    });
 
-    let library = device
-        .newLibraryWithSource_options_error(&source, None)
-        .expect("failed to compile Metal shaders");
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("terminal_pipeline_layout"),
+        bind_group_layouts: &[bind_group_layout],
+        push_constant_ranges: &[],
+    });
 
-    let vertex_fn_name = NSString::from_str("vertex_main");
-    let fragment_fn_name = NSString::from_str("fragment_main");
-
-    let vertex_fn = library
-        .newFunctionWithName(&vertex_fn_name)
-        .expect("vertex_main not found");
-    let fragment_fn = library
-        .newFunctionWithName(&fragment_fn_name)
-        .expect("fragment_main not found");
-
-    let desc = MTLRenderPipelineDescriptor::new();
-    desc.setVertexFunction(Some(&vertex_fn));
-    desc.setFragmentFunction(Some(&fragment_fn));
-
-    let color_attachment = unsafe {
-        desc.colorAttachments().objectAtIndexedSubscript(0)
-    };
-    color_attachment.setPixelFormat(pixel_format);
-
-    // Enable alpha blending for text
-    color_attachment.setBlendingEnabled(true);
-    color_attachment.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
-    color_attachment.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-    color_attachment.setSourceAlphaBlendFactor(MTLBlendFactor::One);
-    color_attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-
-    device
-        .newRenderPipelineStateWithDescriptor_error(&desc)
-        .expect("failed to create render pipeline state")
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("terminal_pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[Vertex::desc()],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::SrcAlpha,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                }),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
 }

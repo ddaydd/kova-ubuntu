@@ -8,23 +8,26 @@ mod session;
 mod terminal;
 mod window;
 
-use objc2::{AnyThread, runtime::ProtocolObject};
-use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSImage};
-use objc2_foundation::{MainThreadMarker, NSData};
-
 use log::LevelFilter;
-use simplelog::{CombinedLogger, Config, TermLogger, TerminalMode, WriteLogger};
+use simplelog::{CombinedLogger, Config as LogConfig, TermLogger, TerminalMode, WriteLogger};
 use std::fs;
 use std::path::PathBuf;
+use winit::event_loop::EventLoop;
 
-static ICON_DATA: &[u8] = include_bytes!("../assets/kova.icns");
+fn log_dir() -> PathBuf {
+    directories::ProjectDirs::from("", "", "kova")
+        .map(|d| d.data_dir().to_path_buf())
+        .unwrap_or_else(|| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+            PathBuf::from(home).join(".local/share/kova")
+        })
+        .join("logs")
+}
 
 fn setup_logging() {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let log_dir = PathBuf::from(home).join("Library/Logs/Kova");
-    fs::create_dir_all(&log_dir).expect("cannot create log dir");
-    let log_file =
-        fs::File::create(log_dir.join("kova.log")).expect("cannot create log file");
+    let dir = log_dir();
+    fs::create_dir_all(&dir).expect("cannot create log dir");
+    let log_file = fs::File::create(dir.join("kova.log")).expect("cannot create log file");
 
     let level = std::env::var("RUST_LOG")
         .ok()
@@ -32,13 +35,12 @@ fn setup_logging() {
         .unwrap_or(LevelFilter::Debug);
 
     let mut loggers: Vec<Box<dyn simplelog::SharedLogger>> =
-        vec![WriteLogger::new(level, Config::default(), log_file)];
+        vec![WriteLogger::new(level, LogConfig::default(), log_file)];
 
-    // Stderr logger only when RUST_LOG is set (dev in terminal)
     if std::env::var("RUST_LOG").is_ok() {
         loggers.push(TermLogger::new(
             level,
-            Config::default(),
+            LogConfig::default(),
             TerminalMode::Stderr,
             simplelog::ColorChoice::Auto,
         ));
@@ -55,33 +57,20 @@ fn main() {
         return;
     }
 
-    // --session N → restore session.N.json instead of session.json
-    let session_backup = args.windows(2)
+    let session_backup = args
+        .windows(2)
         .find(|w| w[0] == "--session")
         .and_then(|w| w[1].parse::<usize>().ok());
 
     setup_logging();
 
-    // Log panics to file before aborting
     std::panic::set_hook(Box::new(|info| {
         log::error!("PANIC: {}", info);
     }));
 
     let config = config::Config::load();
 
-    let mtm = MainThreadMarker::new().expect("must run on main thread");
-    let app = NSApplication::sharedApplication(mtm);
-    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
-
-    // Set app icon
-    let data = NSData::with_bytes(ICON_DATA);
-    if let Some(icon) = NSImage::initWithData(NSImage::alloc(), &data) {
-        unsafe { app.setApplicationIconImage(Some(&icon)) };
-    }
-
-    let delegate = app::AppDelegate::new(mtm, config, session_backup);
-    let delegate_proto = ProtocolObject::from_ref(&*delegate);
-    app.setDelegate(Some(delegate_proto));
-
-    app.run();
+    let event_loop = EventLoop::new().expect("failed to create event loop");
+    let mut app = app::App::new(config, session_backup);
+    event_loop.run_app(&mut app).expect("event loop error");
 }

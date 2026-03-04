@@ -1,20 +1,21 @@
-use objc2_app_kit::{NSEvent, NSEventModifierFlags};
 use std::collections::HashMap;
+use winit::event::{ElementState, Modifiers};
+use winit::keyboard::{Key, NamedKey, SmolStr};
 
 use crate::pane::{NavDirection, SplitAxis};
 
 /// A hashable key combination (modifiers + key).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct KeyCombo {
-    pub cmd: bool,
+    pub cmd: bool,   // Super/Win key on Linux
     pub ctrl: bool,
-    pub option: bool,
+    pub option: bool, // Alt key on Linux
     pub shift: bool,
-    pub key: Key,
+    pub key: KeyType,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Key {
+pub enum KeyType {
     Char(char),
     Up,
     Down,
@@ -24,7 +25,7 @@ pub enum Key {
     Enter,
 }
 
-/// Window/tab/split actions dispatched from performKeyEquivalent.
+/// Window/tab/split actions dispatched from key events.
 #[derive(Debug, Clone)]
 pub enum Action {
     NewTab,
@@ -69,41 +70,34 @@ pub struct Keybindings {
 }
 
 impl KeyCombo {
-    pub fn from_event(event: &NSEvent) -> Self {
-        let modifiers = event.modifierFlags();
-        let cmd = modifiers.contains(NSEventModifierFlags::Command);
-        let ctrl = modifiers.contains(NSEventModifierFlags::Control);
-        let option = modifiers.contains(NSEventModifierFlags::Option);
-        let shift = modifiers.contains(NSEventModifierFlags::Shift);
+    pub fn from_winit(key: &Key, modifiers: &Modifiers) -> Self {
+        let state = modifiers.state();
+        let cmd = state.super_key();
+        let ctrl = state.control_key();
+        let option = state.alt_key();
+        let shift = state.shift_key();
 
-        // Use keycodes only for special keys (arrows, enter, backspace) where
-        // charactersIgnoringModifiers returns private-use Unicode characters.
-        // For all other keys, use charactersIgnoringModifiers which respects the
-        // active keyboard layout (AZERTY, QWERTZ, etc.).
-        let key = keycode_to_special(event.keyCode())
-            .unwrap_or_else(|| {
-                let chars = event.charactersIgnoringModifiers();
-                let ch_str = chars.map(|s| s.to_string()).unwrap_or_default();
-                let c = ch_str.chars().next().unwrap_or('\0');
-                Key::Char(c.to_ascii_lowercase())
-            });
+        let key_type = match key {
+            Key::Named(NamedKey::ArrowUp) => KeyType::Up,
+            Key::Named(NamedKey::ArrowDown) => KeyType::Down,
+            Key::Named(NamedKey::ArrowLeft) => KeyType::Left,
+            Key::Named(NamedKey::ArrowRight) => KeyType::Right,
+            Key::Named(NamedKey::Backspace) => KeyType::Backspace,
+            Key::Named(NamedKey::Enter) => KeyType::Enter,
+            Key::Character(s) => {
+                let c = s.chars().next().unwrap_or('\0').to_ascii_lowercase();
+                KeyType::Char(c)
+            }
+            _ => KeyType::Char('\0'),
+        };
 
-        KeyCombo { cmd, ctrl, option, shift, key }
-    }
-}
-
-/// Map macOS virtual keycodes to Key for special keys only (arrows, enter,
-/// backspace). Character keys are resolved via charactersIgnoringModifiers
-/// to respect the active keyboard layout.
-fn keycode_to_special(code: u16) -> Option<Key> {
-    match code {
-        0x24 => Some(Key::Enter),
-        0x33 => Some(Key::Backspace),
-        0x7E => Some(Key::Up),
-        0x7D => Some(Key::Down),
-        0x7B => Some(Key::Left),
-        0x7C => Some(Key::Right),
-        _ => None,
+        KeyCombo {
+            cmd,
+            ctrl,
+            option,
+            shift,
+            key: key_type,
+        }
     }
 }
 
@@ -114,14 +108,13 @@ fn parse_key_combo(s: &str) -> KeyCombo {
         ctrl: false,
         option: false,
         shift: false,
-        key: Key::Char('\0'),
+        key: KeyType::Char('\0'),
     };
 
     let num_parts = s.split('+').count();
     for (i, part) in s.split('+').enumerate() {
         let trimmed = part.trim();
         if i < num_parts - 1 {
-            // Modifier
             if trimmed.eq_ignore_ascii_case("cmd") || trimmed.eq_ignore_ascii_case("command") {
                 combo.cmd = true;
             } else if trimmed.eq_ignore_ascii_case("ctrl") || trimmed.eq_ignore_ascii_case("control") {
@@ -134,21 +127,20 @@ fn parse_key_combo(s: &str) -> KeyCombo {
                 log::warn!("Unknown modifier in keybinding: {}", trimmed);
             }
         } else {
-            // Key (last token)
             let lower = trimmed.to_ascii_lowercase();
             combo.key = match lower.as_str() {
-                "up" => Key::Up,
-                "down" => Key::Down,
-                "left" => Key::Left,
-                "right" => Key::Right,
-                "backspace" | "delete" => Key::Backspace,
-                "enter" | "return" => Key::Enter,
-                "[" => Key::Char('['),
-                "]" => Key::Char(']'),
-                s if s.len() == 1 => Key::Char(s.chars().next().unwrap()),
+                "up" => KeyType::Up,
+                "down" => KeyType::Down,
+                "left" => KeyType::Left,
+                "right" => KeyType::Right,
+                "backspace" | "delete" => KeyType::Backspace,
+                "enter" | "return" => KeyType::Enter,
+                "[" => KeyType::Char('['),
+                "]" => KeyType::Char(']'),
+                s if s.len() == 1 => KeyType::Char(s.chars().next().unwrap()),
                 _ => {
                     log::warn!("Unknown key in keybinding: {}", trimmed);
-                    Key::Char('\0')
+                    KeyType::Char('\0')
                 }
             };
         }
@@ -193,7 +185,10 @@ impl Keybindings {
             &keys.switch_tab_1, &keys.switch_tab_2, &keys.switch_tab_3,
             &keys.switch_tab_4, &keys.switch_tab_5, &keys.switch_tab_6,
             &keys.switch_tab_7, &keys.switch_tab_8, &keys.switch_tab_9,
-        ].iter().enumerate() {
+        ]
+        .iter()
+        .enumerate()
+        {
             bind(s, Action::SwitchTab(i));
         }
 
@@ -225,6 +220,9 @@ impl Keybindings {
         tbind(&term.word_forward, TerminalAction::WordForward);
         tbind(&term.shift_enter, TerminalAction::ShiftEnter);
 
-        Keybindings { window_map, terminal_map }
+        Keybindings {
+            window_map,
+            terminal_map,
+        }
     }
 }

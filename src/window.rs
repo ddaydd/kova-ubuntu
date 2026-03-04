@@ -1,78 +1,19 @@
-use objc2::rc::Retained;
-use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
-use objc2_app_kit::{NSAlert, NSAlertStyle, NSApplication, NSBackingStoreType, NSCursor, NSEvent, NSEventModifierFlags, NSPasteboard, NSTextInputClient, NSTrackingArea, NSTrackingAreaOptions, NSWindow, NSWindowButton, NSWindowDelegate, NSWindowStyleMask, NSWindowTitleVisibility};
-use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use objc2_foundation::{NSArray, NSObjectProtocol, NSString};
-use objc2_metal::MTLCreateSystemDefaultDevice;
-use objc2_quartz_core::CAMetalLayer;
-use std::cell::{Cell, OnceCell, RefCell};
+use parking_lot::RwLock;
 use std::sync::Arc;
+use winit::dpi::{LogicalSize, PhysicalSize};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event_loop::ActiveEventLoop;
+use winit::keyboard::{Key, NamedKey};
+use winit::window::{Window, WindowAttributes, WindowId};
 
-use crate::config::{Config, TerminalConfig};
+use crate::app::WindowAction;
+use crate::config::Config;
 use crate::input;
-use crate::keybindings::{Action, Keybindings, KeyCombo};
+use crate::keybindings::{Action, KeyCombo, Keybindings};
 use crate::pane::{NavDirection, Pane, PaneId, SplitDirection, SplitTree, Tab};
 use crate::renderer::{FilterRenderData, PaneViewport, Renderer};
-use crate::terminal::{FilterMatch, GridPos, Selection};
-
-#[derive(Clone, Copy)]
-struct SeparatorDrag {
-    is_hsplit: bool,
-    origin_pixel: f32,
-    origin_ratio: f32,
-    parent_dim: f32,
-    node_ptr: usize,
-}
-
-#[derive(Clone, Copy)]
-struct DragTabState {
-    tab_index: usize,
-    start_x: f32,
-    current_x: f32,
-    dragging: bool,
-}
-
-pub struct KovaViewIvars {
-    renderer: OnceCell<Arc<parking_lot::RwLock<Renderer>>>,
-    tabs: RefCell<Vec<Tab>>,
-    active_tab: Cell<usize>,
-    metal_layer: OnceCell<Retained<CAMetalLayer>>,
-    last_scale: Cell<f64>,
-    last_focused: Cell<bool>,
-    config: OnceCell<Config>,
-    keybindings: OnceCell<Keybindings>,
-    drag_separator: Cell<Option<SeparatorDrag>>,
-    filter: RefCell<Option<FilterState>>,
-    rename_tab: RefCell<Option<RenameTabState>>,
-    rename_pane: RefCell<Option<RenamePaneState>>,
-    /// Left inset (pixels) for tab bar, cached from traffic light button positions.
-    tab_bar_left_inset: Cell<f32>,
-    /// Tab index targeted by right-click color menu.
-    color_menu_tab: Cell<usize>,
-    drag_tab: Cell<Option<DragTabState>>,
-    /// URL currently hovered (pane_id, visible_row, col_start, col_end, url) — set by mouseMoved when Cmd held
-    hovered_url: RefCell<Option<(PaneId, usize, u16, u16, String)>>,
-    /// Whether Cmd key is currently held (for URL hover detection)
-    cmd_held: Cell<bool>,
-    /// Auto-scroll speed during drag selection (lines/tick, positive = down, negative = up, 0 = inactive)
-    auto_scroll_speed: Cell<i32>,
-    /// Marked text from IME composition (dead keys, etc.)
-    marked_text: RefCell<Option<String>>,
-    /// Current NSEvent being processed by interpretKeyEvents, so doCommandBySelector can access it.
-    /// SAFETY: pointer is only live during the synchronous keyDown → interpretKeyEvents → doCommandBySelector
-    /// call chain, and cleared immediately after. Never accessed outside that stack frame.
-    current_event: Cell<Option<*const NSEvent>>,
-    /// Window is closing — tick() should return false immediately.
-    closing: Cell<bool>,
-    /// Skip session save for this window (Cmd+Shift+Q kill).
-    skip_session_save: Cell<bool>,
-    /// Cached last window title (for OSC 0/2 dedup).
-    last_title: RefCell<Option<String>>,
-    /// Git branch poll counter (ticks since last poll).
-    git_poll_counter: Cell<u32>,
-    /// Git branch poll interval in ticks (fps * 2 ≈ every 2 seconds).
-    git_poll_interval: Cell<u32>,
-}
+use crate::session::WindowSession;
+use crate::terminal::{FilterMatch, TerminalState};
 
 struct FilterState {
     query: String,
@@ -83,2288 +24,749 @@ struct RenameTabState {
     input: String,
 }
 
-struct RenamePaneState {
-    input: String,
+pub struct KovaWindow {
+    window: Arc<Window>,
+    surface: wgpu::Surface<'static>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    surface_config: wgpu::SurfaceConfiguration,
+    renderer: Renderer,
+    tabs: Vec<Tab>,
+    active_tab: usize,
+    keybindings: Keybindings,
+    config: Config,
+    last_scale: f64,
+    filter: Option<FilterState>,
+    rename_tab: Option<RenameTabState>,
+    modifiers: winit::event::Modifiers,
+    closing: bool,
+    /// Git branch poll counter (ticks since last poll).
+    git_poll_counter: u32,
+    git_poll_interval: u32,
 }
 
-define_class!(
-    #[unsafe(super(objc2_app_kit::NSView))]
-    #[thread_kind = MainThreadOnly]
-    #[name = "KovaView"]
-    #[ivars = KovaViewIvars]
-    pub struct KovaView;
+impl KovaWindow {
+    pub fn new(
+        event_loop: &ActiveEventLoop,
+        config: &Config,
+        tabs: Vec<Tab>,
+        active_tab: usize,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let attrs = WindowAttributes::default()
+            .with_title("Kova")
+            .with_inner_size(LogicalSize::new(config.window.width, config.window.height));
 
-    unsafe impl NSObjectProtocol for KovaView {}
-    unsafe impl NSWindowDelegate for KovaView {
-        /// Intercept the close button (traffic light) to use our closing flow
-        /// instead of letting AppKit destroy the window directly.
-        #[unsafe(method(windowShouldClose:))]
-        fn window_should_close(&self, _sender: &objc2::runtime::AnyObject) -> bool {
-            self.do_close_window();
-            false // we handle closing via the closing flag + timer
-        }
+        let window = Arc::new(event_loop.create_window(attrs)?);
+        let scale = window.scale_factor();
+
+        // Init wgpu
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
+            ..Default::default()
+        });
+
+        // SAFETY: window Arc keeps the window alive for the lifetime of the surface
+        let surface = unsafe {
+            instance.create_surface(wgpu::SurfaceTarget::from(window.clone()))
+        }?;
+
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: Some(&surface),
+            force_fallback_adapter: false,
+        }))
+        .ok_or("No suitable GPU adapter found")?;
+
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("kova_device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                memory_hints: Default::default(),
+            },
+            None,
+        ))?;
+
+        let size = window.inner_size();
+        let surface_caps = surface.get_capabilities(&adapter);
+        let surface_format = surface_caps
+            .formats
+            .iter()
+            .find(|f| f.is_srgb())
+            .copied()
+            .unwrap_or(surface_caps.formats[0]);
+
+        let surface_config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: surface_format,
+            width: size.width.max(1),
+            height: size.height.max(1),
+            present_mode: wgpu::PresentMode::Fifo,
+            alpha_mode: surface_caps.alpha_modes[0],
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+        surface.configure(&device, &surface_config);
+
+        let renderer = Renderer::new(&device, &queue, surface_format, scale, config);
+        let keybindings = Keybindings::from_config(&config.keys);
+
+        let fps = config.terminal.fps;
+
+        let mut win = KovaWindow {
+            window,
+            surface,
+            device,
+            queue,
+            surface_config,
+            renderer,
+            tabs,
+            active_tab,
+            keybindings,
+            config: config.clone(),
+            last_scale: scale,
+            filter: None,
+            rename_tab: None,
+            modifiers: Default::default(),
+            closing: false,
+            git_poll_counter: 0,
+            git_poll_interval: fps * 2,
+        };
+
+        // Initial resize
+        win.resize_all_panes();
+
+        Ok(win)
     }
-    unsafe impl NSTextInputClient for KovaView {
-        #[unsafe(method(insertText:replacementRange:))]
-        unsafe fn insert_text_replacement_range(&self, string: &objc2::runtime::AnyObject, _replacement_range: objc2_foundation::NSRange) {
-            let text = unsafe { nsstring_from_input(string) };
-            // Clear marked text
-            *self.ivars().marked_text.borrow_mut() = None;
-            // Write to PTY
+
+    pub fn id(&self) -> WindowId {
+        self.window.id()
+    }
+
+    pub fn request_redraw(&self) {
+        self.window.request_redraw();
+    }
+
+    pub fn session_data(&self) -> WindowSession {
+        let pos = self.window.inner_position().ok();
+        let size = self.window.inner_size();
+        let frame = pos.map(|p| {
+            (
+                p.x as f64,
+                p.y as f64,
+                size.width as f64,
+                size.height as f64,
+            )
+        });
+        WindowSession::from_tabs(&self.tabs, self.active_tab, frame)
+    }
+
+    /// Per-frame tick. Returns false if window should close.
+    pub fn tick(&mut self) -> bool {
+        if self.closing {
+            return false;
+        }
+
+        // Reap dead panes
+        let mut dead_ids = Vec::new();
+        if let Some(tab) = self.tabs.get(self.active_tab) {
+            dead_ids = tab.tree.exited_pane_ids();
+        }
+        for id in dead_ids {
+            self.close_pane(id);
+        }
+
+        // Inject pending commands
+        for tab in &self.tabs {
+            tab.tree.for_each_pane(&mut |pane| {
+                pane.inject_pending_command();
+            });
+        }
+
+        // Git branch polling
+        self.git_poll_counter += 1;
+        if self.git_poll_counter >= self.git_poll_interval {
+            self.git_poll_counter = 0;
             if let Some(pane) = self.focused_pane() {
-                pane.terminal.write().reset_scroll();
-                input::write_text(&text, &pane.pty);
-            }
-        }
-
-        #[unsafe(method(doCommandBySelector:))]
-        unsafe fn do_command_by_selector(&self, _selector: objc2::runtime::Sel) {
-            if let Some(event_ptr) = self.ivars().current_event.get() {
-                let event = unsafe { &*event_ptr };
-                if let Some(pane) = self.focused_pane() {
-                    let cursor_keys_app = pane.terminal.read().cursor_keys_application;
-                    pane.terminal.write().reset_scroll();
-                    if let Some(kb) = self.ivars().keybindings.get() {
-                        input::handle_key_event(event, &pane.pty, cursor_keys_app, kb);
-                    }
+                if let Some(cwd) = pane.cwd() {
+                    let branch = crate::terminal::parser::resolve_git_branch(&cwd);
+                    let mut term = pane.terminal.write();
+                    term.git_branch = branch;
+                    term.cwd = Some(cwd);
                 }
             }
         }
 
-        #[unsafe(method(setMarkedText:selectedRange:replacementRange:))]
-        unsafe fn set_marked_text_selected_range_replacement_range(
-            &self,
-            string: &objc2::runtime::AnyObject,
-            _selected_range: objc2_foundation::NSRange,
-            _replacement_range: objc2_foundation::NSRange,
-        ) {
-            let text = unsafe { nsstring_from_input(string) };
-            *self.ivars().marked_text.borrow_mut() = if text.is_empty() { None } else { Some(text) };
+        // Check bells
+        for tab in &mut self.tabs {
+            tab.check_bell();
         }
 
-        #[unsafe(method(unmarkText))]
-        fn unmark_text(&self) {
-            *self.ivars().marked_text.borrow_mut() = None;
-        }
+        // Render
+        self.render();
 
-        #[unsafe(method(hasMarkedText))]
-        fn has_marked_text(&self) -> bool {
-            self.ivars().marked_text.borrow().is_some()
-        }
-
-        #[unsafe(method(markedRange))]
-        fn marked_range(&self) -> objc2_foundation::NSRange {
-            if self.ivars().marked_text.borrow().is_some() {
-                objc2_foundation::NSRange { location: 0, length: 1 }
-            } else {
-                objc2_foundation::NSRange { location: objc2_foundation::NSNotFound as usize, length: 0 }
-            }
-        }
-
-        #[unsafe(method(selectedRange))]
-        fn selected_range(&self) -> objc2_foundation::NSRange {
-            objc2_foundation::NSRange { location: objc2_foundation::NSNotFound as usize, length: 0 }
-        }
-
-        #[unsafe(method_id(attributedSubstringForProposedRange:actualRange:))]
-        #[unsafe(method_family = none)]
-        unsafe fn attributed_substring_for_proposed_range(
-            &self,
-            _range: objc2_foundation::NSRange,
-            _actual_range: objc2_foundation::NSRangePointer,
-        ) -> Option<objc2::rc::Retained<objc2_foundation::NSAttributedString>> {
-            None
-        }
-
-        #[unsafe(method_id(validAttributesForMarkedText))]
-        #[unsafe(method_family = none)]
-        fn valid_attributes_for_marked_text(&self) -> objc2::rc::Retained<objc2_foundation::NSArray<objc2_foundation::NSAttributedStringKey>> {
-            objc2_foundation::NSArray::new()
-        }
-
-        #[unsafe(method(firstRectForCharacterRange:actualRange:))]
-        unsafe fn first_rect_for_character_range(
-            &self,
-            _range: objc2_foundation::NSRange,
-            _actual_range: objc2_foundation::NSRangePointer,
-        ) -> objc2_core_foundation::CGRect {
-            let frame = self.frame();
-            let window_frame = if let Some(window) = self.window() {
-                window.frame()
-            } else {
-                return objc2_core_foundation::CGRect::ZERO;
-            };
-            objc2_core_foundation::CGRect {
-                origin: objc2_core_foundation::CGPoint {
-                    x: window_frame.origin.x + frame.origin.x,
-                    y: window_frame.origin.y + frame.origin.y,
-                },
-                size: objc2_core_foundation::CGSize { width: 0.0, height: 0.0 },
-            }
-        }
-
-        #[unsafe(method(characterIndexForPoint:))]
-        fn character_index_for_point(&self, _point: objc2_core_foundation::CGPoint) -> usize {
-            objc2_foundation::NSNotFound as usize
-        }
+        !self.tabs.is_empty()
     }
 
-    impl KovaView {
-        #[unsafe(method(acceptsFirstResponder))]
-        fn accepts_first_responder(&self) -> bool {
-            true
+    fn render(&mut self) {
+        let tab = match self.tabs.get(self.active_tab) {
+            Some(t) => t,
+            None => return,
+        };
+
+        let size = self.window.inner_size();
+        let scale = self.window.scale_factor() as f32;
+        let viewport_w = size.width as f32;
+        let viewport_h = size.height as f32;
+
+        if viewport_w == 0.0 || viewport_h == 0.0 {
+            return;
         }
 
-        #[unsafe(method(mouseDownCanMoveWindow))]
-        fn mouse_down_can_move_window(&self) -> bool {
-            // Must be false so we get mouseDown events in the titlebar area.
-            // We handle window dragging ourselves in hit_test_tab_bar when clicking
-            // outside of tabs.
-            false
-        }
+        let (cell_w, cell_h) = self.renderer.cell_size();
+        let tab_bar_h = if self.tabs.len() > 1 { (cell_h * 2.0).round() } else { 0.0 };
+        let global_bar_h = cell_h;
+        let pane_area_y = tab_bar_h;
+        let pane_area_h = viewport_h - tab_bar_h - global_bar_h;
 
-        #[unsafe(method(keyDown:))]
-        fn key_down(&self, event: &NSEvent) {
-            // If rename tab is active, route keys to rename
-            if self.ivars().rename_tab.borrow().is_some() {
-                self.handle_rename_tab_key(event);
-                return;
-            }
+        let total_vp = PaneViewport {
+            x: 0.0,
+            y: pane_area_y,
+            width: viewport_w,
+            height: pane_area_h,
+        };
 
-            // If rename pane is active, route keys to rename
-            if self.ivars().rename_pane.borrow().is_some() {
-                self.handle_rename_pane_key(event);
-                return;
-            }
+        // Collect pane data for rendering
+        let mut panes = Vec::new();
+        tab.tree.for_each_pane_with_viewport(total_vp, &mut |pane, vp| {
+            panes.push((
+                pane.terminal.clone(),
+                vp,
+                pane.is_ready(),
+                pane.id == tab.focused_pane,
+                pane.id,
+                pane.custom_title.clone(),
+            ));
+        });
 
-            // If filter is active, route keys to filter
-            if self.ivars().filter.borrow().is_some() {
-                self.handle_filter_key(event);
-                return;
-            }
+        // Collect separators
+        let mut separators = Vec::new();
+        tab.tree.collect_separators(total_vp, &mut separators);
 
-            // Ctrl+Option+arrows → adjust virtual width
-            {
-                let modifiers = event.modifierFlags();
-                let has_ctrl = modifiers.contains(NSEventModifierFlags::Control);
-                let has_option = modifiers.contains(NSEventModifierFlags::Option);
-                let has_cmd = modifiers.contains(NSEventModifierFlags::Command);
-                if has_ctrl && has_option && !has_cmd {
-                    if let Some(chars) = event.charactersIgnoringModifiers() {
-                        let dir = match chars.to_string().as_str() {
-                            "\u{f703}" => Some(1.0_f32),
-                            "\u{f702}" => Some(-1.0_f32),
-                            _ => None,
-                        };
-                        if let Some(dir) = dir {
-                            self.adjust_virtual_width(dir);
-                            return;
-                        }
-                    }
+        // Tab titles
+        let tab_titles: Vec<(String, bool, Option<usize>, bool, bool)> = if self.tabs.len() > 1 {
+            self.tabs
+                .iter()
+                .enumerate()
+                .map(|(i, t)| {
+                    let is_renaming = i == self.active_tab && self.rename_tab.is_some();
+                    let title = if is_renaming {
+                        self.rename_tab.as_ref().unwrap().input.clone()
+                    } else {
+                        t.title()
+                    };
+                    (title, i == self.active_tab, t.color, is_renaming, t.has_bell)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let filter_data = self.filter.as_ref().map(|f| FilterRenderData {
+            query: f.query.clone(),
+            matches: f.matches.clone(),
+        });
+
+        self.renderer.render_panes(
+            &self.device,
+            &self.queue,
+            &self.surface,
+            &panes,
+            &separators,
+            &tab_titles,
+            filter_data.as_ref(),
+            0.0, // no traffic light inset on Linux
+            0,
+            0,
+        );
+    }
+
+    pub fn handle_event(&mut self, event: &WindowEvent, config: &Config) -> WindowAction {
+        match event {
+            WindowEvent::Resized(size) => {
+                if size.width > 0 && size.height > 0 {
+                    self.surface_config.width = size.width;
+                    self.surface_config.height = size.height;
+                    self.surface.configure(&self.device, &self.surface_config);
+                    self.resize_all_panes();
                 }
             }
 
-            if self.focused_pane().is_some() {
-                // Store the event so doCommandBySelector can access it
-                self.ivars().current_event.set(Some(event as *const NSEvent));
-                // Route through macOS input handling for dead key / IME composition
-                let event_retained: Retained<NSEvent> = event.retain();
-                let events = NSArray::from_retained_slice(&[event_retained]);
-                self.interpretKeyEvents(&events);
-                self.ivars().current_event.set(None);
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                if (*scale_factor - self.last_scale).abs() > 0.01 {
+                    self.last_scale = *scale_factor;
+                    self.renderer.rebuild_atlas(&self.device, &self.queue, *scale_factor);
+                    self.resize_all_panes();
+                }
             }
-        }
 
-        #[unsafe(method(performKeyEquivalent:))]
-        fn perform_key_equivalent(&self, event: &NSEvent) -> objc2::runtime::Bool {
-            let combo = KeyCombo::from_event(event);
+            WindowEvent::CloseRequested => {
+                self.closing = true;
+                return WindowAction::CloseWindow;
+            }
 
-            let keybindings = match self.ivars().keybindings.get() {
-                Some(kb) => kb,
-                None => return objc2::runtime::Bool::NO,
-            };
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = *modifiers;
+            }
 
-            if let Some(action) = keybindings.window_map.get(&combo) {
-                log::debug!("performKeyEquivalent: combo={:?} action={:?}", combo, action);
-                match action {
-                    Action::ToggleFilter => self.toggle_filter(),
-                    Action::ClearScrollback => {
-                        if let Some(pane) = self.focused_pane() {
-                            pane.terminal.write().clear_scrollback_and_screen();
-                            pane.pty.write(b"\x0c");
+            WindowEvent::KeyboardInput { event, .. } => {
+                if event.state != ElementState::Pressed {
+                    return WindowAction::None;
+                }
+
+                // Handle rename tab mode
+                if let Some(ref mut rename) = self.rename_tab {
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Enter) => {
+                            let new_title = rename.input.clone();
+                            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                                tab.custom_title = if new_title.is_empty() {
+                                    None
+                                } else {
+                                    Some(new_title)
+                                };
+                            }
+                            self.rename_tab = None;
                         }
+                        Key::Named(NamedKey::Escape) => {
+                            self.rename_tab = None;
+                        }
+                        Key::Named(NamedKey::Backspace) => {
+                            rename.input.pop();
+                        }
+                        Key::Character(s) => {
+                            rename.input.push_str(s);
+                        }
+                        _ => {}
                     }
-                    Action::NewWindow => {
-                        let mtm = unsafe { MainThreadMarker::new_unchecked() };
-                        crate::app::create_new_window(mtm);
+                    return WindowAction::None;
+                }
+
+                // Handle filter mode
+                if let Some(ref mut filter) = self.filter {
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Escape) => {
+                            self.filter = None;
+                        }
+                        Key::Named(NamedKey::Backspace) => {
+                            filter.query.pop();
+                            self.update_filter_matches();
+                        }
+                        Key::Character(s) => {
+                            filter.query.push_str(s);
+                            self.update_filter_matches();
+                        }
+                        _ => {}
                     }
-                    Action::NewTab => self.do_new_tab(),
-                    Action::VSplit => self.do_split(SplitDirection::Horizontal),
-                    Action::HSplit => self.do_split(SplitDirection::Vertical),
-                    Action::VSplitRoot => self.do_split_root(SplitDirection::Horizontal),
-                    Action::HSplitRoot => self.do_split_root(SplitDirection::Vertical),
-                    Action::CloseWindow => self.do_close_window(),
-                    Action::KillWindow => self.do_kill_window(),
-                    Action::ClosePaneOrTab => self.do_close_pane_or_tab(),
-                    Action::PrevTab => self.do_switch_tab_relative(-1),
-                    Action::NextTab => self.do_switch_tab_relative(1),
-                    Action::RenameTab => self.start_rename_tab(),
-                    Action::RenamePane => self.start_rename_pane(),
-                    Action::DetachTab => self.do_detach_tab(),
-                    Action::MergeWindow => self.do_merge_window(),
-                    Action::SwitchTab(idx) => self.do_switch_tab(*idx),
-                    Action::Navigate(dir) => self.do_navigate(*dir),
-                    Action::SwapPane(dir) => self.do_swap_pane(*dir),
-                    Action::Resize(axis, delta) => {
-                        let mut tabs = self.ivars().tabs.borrow_mut();
-                        let idx = self.ivars().active_tab.get();
-                        if let Some(tab) = tabs.get_mut(idx) {
-                            let focused_id = tab.focused_pane;
-                            if tab.tree.adjust_ratio_for_pane(focused_id, *delta, *axis) {
-                                drop(tabs);
+                    return WindowAction::None;
+                }
+
+                // Check window-level keybindings
+                let combo = KeyCombo::from_winit(&event.logical_key, &self.modifiers);
+
+                if let Some(action) = self.keybindings.window_map.get(&combo).cloned() {
+                    match action {
+                        Action::NewWindow => return WindowAction::NewWindow,
+                        Action::CloseWindow => {
+                            self.closing = true;
+                            return WindowAction::CloseWindow;
+                        }
+                        Action::KillWindow => {
+                            self.closing = true;
+                            return WindowAction::CloseWindow;
+                        }
+                        Action::NewTab => self.do_new_tab(),
+                        Action::ClosePaneOrTab => self.do_close_pane_or_tab(),
+                        Action::VSplit => self.do_split(SplitDirection::Horizontal),
+                        Action::HSplit => self.do_split(SplitDirection::Vertical),
+                        Action::VSplitRoot => self.do_split_root(SplitDirection::Horizontal),
+                        Action::HSplitRoot => self.do_split_root(SplitDirection::Vertical),
+                        Action::PrevTab => self.do_switch_tab_relative(-1),
+                        Action::NextTab => self.do_switch_tab_relative(1),
+                        Action::SwitchTab(idx) => {
+                            if idx < self.tabs.len() {
+                                self.active_tab = idx;
+                                self.tabs[idx].clear_bell();
                                 self.resize_all_panes();
                             }
                         }
-                    }
-                    Action::Copy => {
-                        if let Some(pane) = self.focused_pane() {
-                            let mut term = pane.terminal.write();
-                            let text = term.selected_text();
-                            if !text.is_empty() {
-                                let pasteboard = NSPasteboard::generalPasteboard();
-                                pasteboard.clearContents();
-                                let ns_str = NSString::from_str(&text);
-                                unsafe {
-                                    pasteboard.setString_forType(&ns_str, objc2_app_kit::NSPasteboardTypeString);
+                        Action::Navigate(dir) => self.do_navigate(dir),
+                        Action::SwapPane(dir) => self.do_swap_pane(dir),
+                        Action::Resize(axis, delta) => {
+                            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                                let focused_id = tab.focused_pane;
+                                if tab.tree.adjust_ratio_for_pane(focused_id, delta, axis) {
+                                    self.resize_all_panes();
                                 }
-                                term.clear_selection();
-                            } else {
-                                return objc2::runtime::Bool::NO;
+                            }
+                        }
+                        Action::ToggleFilter => self.toggle_filter(),
+                        Action::ClearScrollback => {
+                            if let Some(pane) = self.focused_pane() {
+                                pane.terminal.write().clear_scrollback_and_screen();
+                                pane.pty.write(b"\x0c");
+                            }
+                        }
+                        Action::RenameTab => {
+                            let current = self.tabs.get(self.active_tab)
+                                .and_then(|t| t.custom_title.clone())
+                                .unwrap_or_default();
+                            self.rename_tab = Some(RenameTabState { input: current });
+                        }
+                        Action::RenamePane => {} // TODO
+                        Action::DetachTab => {}  // TODO
+                        Action::MergeWindow => {} // TODO
+                        Action::Copy => {
+                            if let Some(pane) = self.focused_pane() {
+                                let mut term = pane.terminal.write();
+                                let text = term.selected_text();
+                                if !text.is_empty() {
+                                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                        let _ = clipboard.set_text(&text);
+                                    }
+                                    term.clear_selection();
+                                }
+                            }
+                        }
+                        Action::Paste => {
+                            if let Some(pane) = self.focused_pane() {
+                                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                    if let Ok(text) = clipboard.get_text() {
+                                        let bracketed = pane.terminal.read().bracketed_paste;
+                                        if bracketed {
+                                            pane.pty.write(b"\x1b[200~");
+                                        }
+                                        pane.pty.write(text.as_bytes());
+                                        if bracketed {
+                                            pane.pty.write(b"\x1b[201~");
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
-                    Action::Paste => {
-                        if let Some(pane) = self.focused_pane() {
-                            let pasteboard = NSPasteboard::generalPasteboard();
-                            let pasted_image = unsafe { pasteboard.dataForType(objc2_app_kit::NSPasteboardTypePNG) }
-                                .and_then(|data| {
-                                    if data.is_empty() { return None; }
-                                    let bytes = data.to_vec();
-                                    let timestamp = std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .unwrap_or_default()
-                                        .as_millis();
-                                    let path = format!("/tmp/kova-paste-{timestamp}.png");
-                                    std::fs::write(&path, bytes).ok().map(|_| path)
-                                });
+                    return WindowAction::None;
+                }
 
-                            if let Some(path) = pasted_image {
-                                let bracketed = pane.terminal.read().bracketed_paste;
-                                if bracketed { pane.pty.write(b"\x1b[200~"); }
-                                pane.pty.write(path.as_bytes());
-                                if bracketed { pane.pty.write(b"\x1b[201~"); }
-                            } else if let Some(text) = unsafe { pasteboard.stringForType(objc2_app_kit::NSPasteboardTypeString) } {
-                                let text = text.to_string();
-                                let bracketed = pane.terminal.read().bracketed_paste;
-                                if bracketed { pane.pty.write(b"\x1b[200~"); }
-                                pane.pty.write(text.as_bytes());
-                                if bracketed { pane.pty.write(b"\x1b[201~"); }
-                            }
+                // Forward to terminal input handler
+                if let Some(pane) = self.focused_pane() {
+                    let cursor_keys_app = pane.terminal.read().cursor_keys_application;
+                    pane.terminal.write().reset_scroll();
+                    input::handle_key_event(
+                        &event.logical_key,
+                        &self.modifiers,
+                        &pane.pty,
+                        cursor_keys_app,
+                        &self.keybindings,
+                    );
+                }
+            }
+
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
+                // Click to focus pane (hit-test splits)
+                // TODO: implement mouse selection, tab bar clicks, separator drag
+            }
+
+            WindowEvent::MouseWheel { delta, .. } => {
+                if let Some(pane) = self.focused_pane() {
+                    let lines = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => {
+                            (*y * self.config.terminal.scroll_sensitivity as f32) as i32
                         }
-                    }
-                }
-                return objc2::runtime::Bool::YES;
-            }
-
-            objc2::runtime::Bool::NO
-        }
-
-        #[unsafe(method(flagsChanged:))]
-        fn flags_changed(&self, event: &NSEvent) {
-            let modifiers = event.modifierFlags();
-            let cmd = modifiers.contains(NSEventModifierFlags::Command);
-            self.ivars().cmd_held.set(cmd);
-            if !cmd {
-                let had_hover = self.ivars().hovered_url.borrow().is_some();
-                if had_hover {
-                    *self.ivars().hovered_url.borrow_mut() = None;
-                    NSCursor::arrowCursor().set();
-                    self.mark_dirty();
-                }
-            }
-        }
-
-        #[unsafe(method(setFrameSize:))]
-        fn set_frame_size(&self, new_size: CGSize) {
-            let _: () = unsafe { msg_send![super(self), setFrameSize: new_size] };
-            self.handle_resize();
-        }
-
-        #[unsafe(method(viewDidChangeBackingProperties))]
-        fn view_did_change_backing_properties(&self) {
-            self.handle_resize();
-        }
-
-        #[unsafe(method(scrollWheel:))]
-        fn scroll_wheel(&self, event: &NSEvent) {
-            // Scroll goes to the pane under the cursor, not necessarily the focused one
-            if let Some((pane, _vp)) = self.pane_at_event(event) {
-                let dy = event.scrollingDeltaY();
-                let lines = if event.hasPreciseScrollingDeltas() {
-                    let sensitivity = self.ivars().config.get()
-                        .map(|c| c.terminal.scroll_sensitivity)
-                        .unwrap_or(TerminalConfig::default().scroll_sensitivity);
-                    let acc = pane.scroll_accumulator.get() + dy / sensitivity;
-                    let discrete = acc as i32;
-                    pane.scroll_accumulator.set(acc - discrete as f64);
-                    discrete
-                } else {
-                    dy as i32
-                };
-                if lines != 0 {
-                    let mut term = pane.terminal.write();
-                    term.scroll(lines);
-                    // Reset accumulator when hitting bounds to avoid residual drift
-                    let at_bound = term.scroll_offset() == 0
-                        || term.scroll_offset() == term.scrollback_len() as i32;
-                    if at_bound {
-                        pane.scroll_accumulator.set(0.0);
-                    }
-                }
-            }
-
-            // Horizontal scroll for virtual viewport (trackpad only)
-            if event.hasPreciseScrollingDeltas() {
-                let dx = event.scrollingDeltaX();
-                if dx != 0.0 {
-                    let screen_w = self.drawable_viewport().width;
-                    let min_w = self.min_split_width_px();
-                    let mut tabs = self.ivars().tabs.borrow_mut();
-                    let idx = self.ivars().active_tab.get();
-                    if let Some(tab) = tabs.get_mut(idx) {
-                        let vw = tab.virtual_width(screen_w, min_w);
-                        if vw > screen_w {
-                            tab.scroll_offset_x = (tab.scroll_offset_x - dx as f32)
-                                .clamp(0.0, vw - screen_w);
-                            drop(tabs);
-                            self.mark_dirty();
+                        MouseScrollDelta::PixelDelta(pos) => {
+                            let (_, cell_h) = self.renderer.cell_size();
+                            (pos.y as f32 / cell_h * self.config.terminal.scroll_sensitivity as f32)
+                                as i32
                         }
-                    }
-                }
-            }
-        }
-
-        #[unsafe(method(mouseDown:))]
-        fn mouse_down(&self, event: &NSEvent) {
-            let (px, py) = self.event_to_pixel(event);
-
-            // Check filter click
-            if self.ivars().filter.borrow().is_some() {
-                self.handle_filter_click(px, py);
-                return;
-            }
-
-            // Check tab bar click
-            if self.hit_test_tab_bar(px, py, event) {
-                return;
-            }
-
-            // Check separator hit
-            if let Some(drag) = self.hit_test_separator(px, py) {
-                self.ivars().drag_separator.set(Some(drag));
-                return;
-            }
-
-            // Cmd+Click opens URL
-            let modifiers = event.modifierFlags();
-            if modifiers.contains(NSEventModifierFlags::Command) {
-                if let Some(url) = self.ivars().hovered_url.borrow().as_ref().map(|h| h.4.clone()) {
-                    let _ = std::process::Command::new("open").arg(&url).spawn();
-                    return;
-                }
-            }
-
-            // Click sets focus to the pane under the cursor
-            if let Some((pane, vp)) = self.pane_at_event(event) {
-                let old_focused = {
-                    let tabs = self.ivars().tabs.borrow();
-                    let idx = self.ivars().active_tab.get();
-                    tabs.get(idx).map(|t| t.focused_pane).unwrap_or(0)
-                };
-                {
-                    let mut tabs = self.ivars().tabs.borrow_mut();
-                    let idx = self.ivars().active_tab.get();
-                    if let Some(tab) = tabs.get_mut(idx) {
-                        tab.focused_pane = pane.id;
-                    }
-                }
-                // Mark old focused pane dirty so its dim overlay updates
-                if old_focused != pane.id {
-                    let tabs = self.ivars().tabs.borrow();
-                    let idx = self.ivars().active_tab.get();
-                    if let Some(tab) = tabs.get(idx) {
-                        if let Some(old) = tab.tree.pane(old_focused) {
-                            old.terminal.read().dirty.store(true, std::sync::atomic::Ordering::Relaxed);
-                        }
-                    }
-                }
-                if let Some(pos) = self.pixel_to_grid_in(event, pane, &vp) {
-                    let mut term = pane.terminal.write();
-                    term.selection = Some(Selection { anchor: pos, end: pos });
-                    term.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
-        }
-
-        #[unsafe(method(mouseDragged:))]
-        fn mouse_dragged(&self, event: &NSEvent) {
-            // Handle tab drag
-            if let Some(mut drag) = self.ivars().drag_tab.get() {
-                let (px, _py) = self.event_to_pixel(event);
-                drag.current_x = px;
-                if !drag.dragging {
-                    if (px - drag.start_x).abs() >= 3.0 {
-                        drag.dragging = true;
-                    } else {
-                        self.ivars().drag_tab.set(Some(drag));
-                        return;
-                    }
-                }
-                if let Some(target) = self.tab_index_at_x(px) {
-                    if target != drag.tab_index {
-                        let mut tabs = self.ivars().tabs.borrow_mut();
-                        tabs.swap(drag.tab_index, target);
-                        drop(tabs);
-                        self.ivars().active_tab.set(target);
-                        drag.tab_index = target;
-                        self.mark_dirty();
-                    }
-                }
-                self.ivars().drag_tab.set(Some(drag));
-                return;
-            }
-
-            // Handle separator drag
-            if let Some(drag) = self.ivars().drag_separator.get() {
-                let (px, py) = self.event_to_pixel(event);
-                // Both origin_pixel and current_pixel are in screen space
-                let current_pixel = if drag.is_hsplit { px } else { py };
-                let new_ratio = drag.origin_ratio + (current_pixel - drag.origin_pixel) / drag.parent_dim;
-                let mut tabs = self.ivars().tabs.borrow_mut();
-                let idx = self.ivars().active_tab.get();
-                if let Some(tab) = tabs.get_mut(idx) {
-                    if tab.tree.set_ratio_by_ptr(drag.node_ptr, new_ratio) {
-                        drop(tabs);
-                        self.resize_all_panes();
-                    }
-                }
-                return;
-            }
-
-            // Drag continues on the focused pane (set by mouseDown)
-            if let Some(pane) = self.focused_pane() {
-                let vp = {
-                    let tabs = self.ivars().tabs.borrow();
-                    let idx = self.ivars().active_tab.get();
-                    tabs.get(idx).and_then(|t| t.tree.viewport_for_pane(pane.id, self.panes_viewport_for_tab(t)))
-                };
-                if let Some(vp) = vp {
-                    if let Some(pos) = self.pixel_to_grid_in(event, pane, &vp) {
-                        // Mouse is inside viewport — normal drag
-                        self.ivars().auto_scroll_speed.set(0);
+                    };
+                    if lines != 0 {
                         let mut term = pane.terminal.write();
-                        if let Some(ref mut sel) = term.selection {
-                            sel.end = pos;
-                            term.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
-                        }
-                    } else {
-                        // Mouse is outside viewport — compute auto-scroll speed
-                        let renderer = self.ivars().renderer.get();
-                        if let Some(renderer) = renderer {
-                            let (_, pixel_y) = self.event_to_pixel(event);
-                            let renderer_r = renderer.read();
-                            let cell_h = renderer_r.cell_size().1;
-                            drop(renderer_r);
-
-                            let rel_y = pixel_y - vp.y;
-                            let term = pane.terminal.read();
-                            let y_offset = term.y_offset_rows() as f32 * cell_h;
-                            let bottom = y_offset + (term.rows as f32 * cell_h);
-
-                            if rel_y < y_offset {
-                                // Above viewport — scroll up
-                                let dist = y_offset - rel_y;
-                                let speed = -((dist / cell_h).ceil() as i32).clamp(1, 10);
-                                self.ivars().auto_scroll_speed.set(speed);
-                            } else if rel_y > bottom {
-                                // Below viewport — scroll down
-                                let dist = rel_y - bottom;
-                                let speed = ((dist / cell_h).ceil() as i32).clamp(1, 10);
-                                self.ivars().auto_scroll_speed.set(speed);
-                            } else {
-                                // Mouse is vertically inside viewport but pixel_to_grid_in
-                                // returned None (e.g. mouse to the left of the grid) — no scroll
-                                self.ivars().auto_scroll_speed.set(0);
-                            }
-                        }
+                        term.scroll(-lines);
                     }
                 }
             }
+
+            WindowEvent::RedrawRequested => {
+                // Rendering is handled in tick()
+            }
+
+            _ => {}
         }
 
-        #[unsafe(method(mouseUp:))]
-        fn mouse_up(&self, _event: &NSEvent) {
-            self.ivars().auto_scroll_speed.set(0);
-            if self.ivars().drag_tab.get().is_some() {
-                self.ivars().drag_tab.set(None);
-                return;
-            }
-            if self.ivars().drag_separator.get().is_some() {
-                self.ivars().drag_separator.set(None);
-                return;
-            }
-            if let Some(pane) = self.focused_pane() {
-                let mut term = pane.terminal.write();
-                // Single click (no drag) — clear selection
-                if let Some(ref sel) = term.selection {
-                    if sel.anchor == sel.end {
-                        term.selection = None;
-                        term.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
-                        return;
-                    }
-                }
-                let text = term.selected_text();
-                if !text.is_empty() {
-                    let pasteboard = NSPasteboard::generalPasteboard();
-                    pasteboard.clearContents();
-                    let ns_str = NSString::from_str(&text);
-                    unsafe {
-                        pasteboard.setString_forType(&ns_str, objc2_app_kit::NSPasteboardTypeString);
-                    }
-                }
-            }
-        }
-
-        #[unsafe(method(tabColorSelected:))]
-        fn tab_color_selected(&self, sender: &objc2_app_kit::NSMenuItem) {
-            let tag = sender.tag();
-            let tab_idx = self.ivars().color_menu_tab.get();
-            let mut tabs = self.ivars().tabs.borrow_mut();
-            if let Some(tab) = tabs.get_mut(tab_idx) {
-                tab.color = if tag < 0 { None } else { Some(tag as usize) };
-            }
-            drop(tabs);
-            self.mark_dirty();
-        }
-
-        #[unsafe(method(rightMouseDown:))]
-        fn right_mouse_down(&self, event: &NSEvent) {
-            let (px, py) = self.event_to_pixel(event);
-            let tab_bar_h = self.tab_bar_height();
-            if py <= tab_bar_h {
-                if let Some(tab_idx) = self.tab_index_at_x(px) {
-                    self.show_tab_color_menu(event, tab_idx);
-                    return;
-                }
-            }
-            // Default behavior for right-click outside tab bar
-            unsafe { msg_send![super(self), rightMouseDown: event] }
-        }
-
-        #[unsafe(method(mouseMoved:))]
-        fn mouse_moved(&self, event: &NSEvent) {
-            self.update_hovered_url(event);
-        }
-
-        #[unsafe(method(updateTrackingAreas))]
-        fn update_tracking_areas(&self) {
-            // Remove old tracking areas
-            let old_areas: Vec<_> = self.trackingAreas().to_vec();
-            for area in &old_areas {
-                self.removeTrackingArea(area);
-            }
-            // Add new one covering entire view
-            let options = NSTrackingAreaOptions::MouseMoved
-                | NSTrackingAreaOptions::ActiveInKeyWindow
-                | NSTrackingAreaOptions::InVisibleRect;
-            let area = unsafe {
-                let alloc: objc2::rc::Allocated<NSTrackingArea> = msg_send![objc2::class!(NSTrackingArea), alloc];
-                NSTrackingArea::initWithRect_options_owner_userInfo(
-                    alloc,
-                    self.bounds(),
-                    options,
-                    Some(self.as_ref()),
-                    None,
-                )
-            };
-            self.addTrackingArea(&area);
-        }
-
-    }
-);
-
-/// Extract a String from an NSTextInputClient input object (NSString or NSAttributedString).
-unsafe fn nsstring_from_input(obj: &objc2::runtime::AnyObject) -> String {
-    let responds: bool = unsafe { msg_send![obj, respondsToSelector: objc2::sel!(string)] };
-    if responds {
-        let ns_str: *const NSString = unsafe { msg_send![obj, string] };
-        unsafe { &*ns_str }.to_string()
-    } else {
-        let ns_str: &NSString = unsafe { &*(obj as *const objc2::runtime::AnyObject as *const NSString) };
-        ns_str.to_string()
-    }
-}
-
-impl KovaView {
-    fn new(mtm: MainThreadMarker, frame: CGRect) -> Retained<Self> {
-        let this = mtm.alloc::<Self>().set_ivars(KovaViewIvars {
-            renderer: OnceCell::new(),
-            tabs: RefCell::new(Vec::new()),
-            active_tab: Cell::new(0),
-            metal_layer: OnceCell::new(),
-            last_scale: Cell::new(0.0),
-            last_focused: Cell::new(true),
-            config: OnceCell::new(),
-            drag_separator: Cell::new(None),
-            filter: RefCell::new(None),
-            rename_tab: RefCell::new(None),
-            rename_pane: RefCell::new(None),
-            tab_bar_left_inset: Cell::new(0.0),
-            color_menu_tab: Cell::new(0),
-            drag_tab: Cell::new(None),
-            hovered_url: RefCell::new(None),
-            cmd_held: Cell::new(false),
-            auto_scroll_speed: Cell::new(0),
-            marked_text: RefCell::new(None),
-            current_event: Cell::new(None),
-            closing: Cell::new(false),
-            skip_session_save: Cell::new(false),
-            last_title: RefCell::new(None),
-            git_poll_counter: Cell::new(0),
-            git_poll_interval: Cell::new(120), // updated in setup_metal
-            keybindings: OnceCell::new(),
-        });
-        unsafe { msg_send![super(this), initWithFrame: frame] }
+        WindowAction::None
     }
 
-    /// Return the currently focused pane (keyboard input target).
     fn focused_pane(&self) -> Option<&Pane> {
-        let tabs = self.ivars().tabs.borrow();
-        let idx = self.ivars().active_tab.get();
-        let tab = tabs.get(idx)?;
-        let pane = tab.tree.pane(tab.focused_pane)?;
-        // SAFETY: The Tab/SplitTree lives in RefCell inside ivars, pinned in ObjC heap.
-        // We only mutate in the render timer (pane removal), never while an event handler holds this ref.
-        Some(unsafe { &*(pane as *const Pane) })
+        self.tabs
+            .get(self.active_tab)
+            .and_then(|tab| tab.tree.pane(tab.focused_pane))
     }
 
-    /// Convert pixel coords to (visible_row, col) within a pane viewport.
-    fn pixel_to_visible_row_col(&self, px: f32, py: f32, pane: &Pane, vp: &PaneViewport) -> Option<(usize, u16)> {
-        let renderer = self.ivars().renderer.get()?;
-        let renderer_r = renderer.read();
-        let (cell_w, cell_h) = renderer_r.cell_size();
-        drop(renderer_r);
+    fn resize_all_panes(&mut self) {
+        let size = self.window.inner_size();
+        let scale = self.window.scale_factor() as f32;
+        let viewport_w = size.width as f32;
+        let viewport_h = size.height as f32;
 
-        let rel_x = px - vp.x - crate::renderer::PANE_H_PADDING;
-        let rel_y = py - vp.y;
-
-        let term = pane.terminal.read();
-        let y_offset = term.y_offset_rows();
-        let col = (rel_x / cell_w).floor() as i32;
-        let visible_row = (rel_y / cell_h).floor() as i32 - y_offset as i32;
-
-        if visible_row < 0 || col < 0 || visible_row >= term.rows as i32 {
-            return None;
-        }
-        Some((visible_row as usize, (col as u16).min(term.cols.saturating_sub(1))))
-    }
-
-    /// Update hovered URL state based on mouse position.
-    fn update_hovered_url(&self, event: &NSEvent) {
-        let modifiers = event.modifierFlags();
-        let cmd = modifiers.contains(NSEventModifierFlags::Command);
-        self.ivars().cmd_held.set(cmd);
-
-        if !cmd {
-            let had_hover = self.ivars().hovered_url.borrow().is_some();
-            if had_hover {
-                *self.ivars().hovered_url.borrow_mut() = None;
-                NSCursor::arrowCursor().set();
-                self.mark_dirty();
-            }
+        if viewport_w == 0.0 || viewport_h == 0.0 {
             return;
         }
 
-        let (px, py) = self.event_to_pixel(event);
-        let tabs = self.ivars().tabs.borrow();
-        let idx = self.ivars().active_tab.get();
-        let tab = match tabs.get(idx) {
-            Some(t) => t,
-            None => return,
-        };
-        let panes_vp = self.panes_viewport_for_tab(tab);
-        // Viewport is already in screen space (x: -scroll_offset_x), so use px directly
-        let hit = tab.tree.hit_test(px, py, panes_vp);
-        let (pane, vp) = match hit {
-            Some((p, v)) => (unsafe { &*(p as *const Pane) }, v),
-            None => {
-                let had_hover = self.ivars().hovered_url.borrow().is_some();
-                if had_hover {
-                    *self.ivars().hovered_url.borrow_mut() = None;
-                    NSCursor::arrowCursor().set();
-                    self.mark_dirty();
-                }
-                return;
-            }
-        };
-        drop(tabs);
-
-        if let Some((visible_row, col)) = self.pixel_to_visible_row_col(px, py, pane, &vp) {
-            let term = pane.terminal.read();
-            if let Some((start, end, url)) = term.url_at(visible_row, col) {
-                let old = self.ivars().hovered_url.borrow().clone();
-                let changed = old.as_ref().map_or(true, |o| o.1 != visible_row || o.2 != start || o.3 != end);
-                if changed {
-                    *self.ivars().hovered_url.borrow_mut() = Some((pane.id, visible_row, start, end, url));
-                    NSCursor::pointingHandCursor().set();
-                    self.mark_dirty();
-                }
-                return;
-            }
-        }
-
-        let had_hover = self.ivars().hovered_url.borrow().is_some();
-        if had_hover {
-            *self.ivars().hovered_url.borrow_mut() = None;
-            NSCursor::arrowCursor().set();
-            self.mark_dirty();
-        }
-    }
-
-    /// Viewport for panes (below tab bar), reading scroll state from the active tab.
-    /// WARNING: borrows tabs — do NOT call while tabs is already borrowed.
-    fn panes_viewport(&self) -> PaneViewport {
-        let tabs = self.ivars().tabs.borrow();
-        let idx = self.ivars().active_tab.get();
-        if let Some(tab) = tabs.get(idx) {
-            let screen_w = self.drawable_viewport().width;
-            let vw = tab.virtual_width(screen_w, self.min_split_width_px());
-            self.panes_viewport_inner(tab.scroll_offset_x, vw)
+        let (cell_w, cell_h) = self.renderer.cell_size();
+        let tab_bar_h = if self.tabs.len() > 1 {
+            (cell_h * 2.0).round()
         } else {
-            self.panes_viewport_inner(0.0, self.drawable_viewport().width)
-        }
-    }
-
-    /// Viewport for panes using a tab reference (no extra borrow on tabs).
-    fn panes_viewport_for_tab(&self, tab: &crate::pane::Tab) -> PaneViewport {
-        let screen_w = self.drawable_viewport().width;
-        let vw = tab.virtual_width(screen_w, self.min_split_width_px());
-        self.panes_viewport_inner(tab.scroll_offset_x, vw)
-    }
-
-    fn panes_viewport_inner(&self, scroll_offset_x: f32, virtual_width: f32) -> PaneViewport {
-        let full = self.drawable_viewport();
-        let tab_bar_h = self.tab_bar_height();
-        let global_bar_h = self.global_bar_height();
-        PaneViewport {
-            x: -scroll_offset_x,
-            y: full.y + tab_bar_h,
-            width: virtual_width,
-            height: full.height - tab_bar_h - global_bar_h,
-        }
-    }
-
-    /// Global status bar height in pixels (1x cell height).
-    fn global_bar_height(&self) -> f32 {
-        let renderer = match self.ivars().renderer.get() {
-            Some(r) => r,
-            None => return 0.0,
+            0.0
         };
-        let r = renderer.read();
-        r.cell_size().1
-    }
-
-    fn backing_scale(&self) -> f32 {
-        self.window().map_or(2.0, |w| w.backingScaleFactor()) as f32
-    }
-
-    /// Compute scaled min_split_width in pixels.
-    fn min_split_width_px(&self) -> f32 {
-        let min_w = self.ivars().config.get()
-            .map(|c| c.splits.min_width)
-            .unwrap_or(300.0);
-        min_w * self.backing_scale()
-    }
-
-    /// Adjust the virtual width override of the active tab.
-    fn adjust_virtual_width(&self, dir: f32) {
-        let step = 200.0 * self.backing_scale();
-        let screen_w = self.drawable_viewport().width;
-        let min_w = self.min_split_width_px();
-        let mut tabs = self.ivars().tabs.borrow_mut();
-        let idx = self.ivars().active_tab.get();
-        if let Some(tab) = tabs.get_mut(idx) {
-            let current_vw = tab.virtual_width(screen_w, min_w);
-            let new_vw = (current_vw + dir * step).max(screen_w);
-            tab.virtual_width_override = if new_vw > screen_w { new_vw } else { 0.0 };
-            tab.clamp_scroll(screen_w, min_w);
-            log::debug!("virtual_width override: {}px", tab.virtual_width_override);
-        }
-        drop(tabs);
-        self.resize_all_panes();
-    }
-
-    fn get_tab_bar_left_inset(&self) -> f32 {
-        let v = self.ivars().tab_bar_left_inset.get();
-        if v > 0.0 { v } else { 136.0 } // fallback 68pt * 2x
-    }
-
-    /// Tab bar height in pixels (2.0x cell height).
-    fn tab_bar_height(&self) -> f32 {
-        let renderer = match self.ivars().renderer.get() {
-            Some(r) => r,
-            None => return 0.0,
+        let global_bar_h = cell_h;
+        let status_bar_h = if self.renderer.status_bar_enabled() {
+            cell_h
+        } else {
+            0.0
         };
-        let r = renderer.read();
-        let (_, cell_h) = r.cell_size();
-        (cell_h * 2.0).round()
-    }
+        let pane_area_y = tab_bar_h;
+        let pane_area_h = viewport_h - tab_bar_h - global_bar_h;
 
-    /// Hit-test separators in the active tab's tree.
-    fn hit_test_separator(&self, px: f32, py: f32) -> Option<SeparatorDrag> {
-        let tabs = self.ivars().tabs.borrow();
-        let idx = self.ivars().active_tab.get();
-        let tab = tabs.get(idx)?;
-        let vp = self.panes_viewport_for_tab(tab);
-        let mut seps = Vec::new();
-        tab.tree.collect_separator_info(vp, &mut seps);
-
-        let scale = self.backing_scale();
-        let tolerance = 4.0 * scale;
-
-        // Separators are in screen space (viewport uses x: -scroll_offset_x)
-        for sep in &seps {
-            if sep.is_hsplit {
-                if (px - sep.pos).abs() < tolerance && py >= sep.cross_start && py <= sep.cross_end {
-                    return Some(SeparatorDrag {
-                        is_hsplit: true,
-                        origin_pixel: px,
-                        origin_ratio: sep.origin_ratio,
-                        parent_dim: sep.parent_dim,
-                        node_ptr: sep.node_ptr,
-                    });
-                }
-            } else {
-                if (py - sep.pos).abs() < tolerance && px >= sep.cross_start && px <= sep.cross_end {
-                    return Some(SeparatorDrag {
-                        is_hsplit: false,
-                        origin_pixel: py,
-                        origin_ratio: sep.origin_ratio,
-                        parent_dim: sep.parent_dim,
-                        node_ptr: sep.node_ptr,
-                    });
-                }
-            }
-        }
-        None
-    }
-
-    /// Hit-test the tab bar. Returns true if click was in the tab bar (and handled).
-    fn hit_test_tab_bar(&self, px: f32, py: f32, event: &NSEvent) -> bool {
-        let tab_bar_h = self.tab_bar_height();
-        if py > tab_bar_h {
-            return false;
-        }
-        if let Some(idx) = self.tab_index_at_x(px) {
-            self.do_switch_tab(idx);
-            self.ivars().drag_tab.set(Some(DragTabState {
-                tab_index: idx,
-                start_x: px,
-                current_x: px,
-                dragging: false,
-            }));
-        } else if let Some(win) = self.window() {
-            // Click in titlebar but not on a tab — initiate window drag
-            win.performWindowDragWithEvent(event);
-        }
-        true
-    }
-
-    /// Returns the tab index at the given x pixel position, or None if outside tabs.
-    fn tab_index_at_x(&self, px: f32) -> Option<usize> {
-        let tabs = self.ivars().tabs.borrow();
-        let tab_count = tabs.len();
-        if tab_count == 0 {
-            return None;
-        }
-        let full = self.drawable_viewport();
-        let left_inset = self.get_tab_bar_left_inset();
-        let renderer = self.ivars().renderer.get()?;
-        let cell_w = renderer.read().cell_size().0;
-        let max_tab_w = cell_w * 20.0;
-        let available_w = full.width - left_inset;
-        let tab_width = (available_w / tab_count as f32).min(max_tab_w);
-        for i in 0..tab_count {
-            let x = left_inset + i as f32 * tab_width;
-            if px >= x && px <= x + tab_width {
-                return Some(i);
-            }
-        }
-        None
-    }
-
-    /// Total drawable viewport in pixels.
-    fn drawable_viewport(&self) -> PaneViewport {
-        let frame = self.frame();
-        let scale = self.window().map_or(2.0, |w| w.backingScaleFactor());
-        PaneViewport {
+        let total_vp = PaneViewport {
             x: 0.0,
-            y: 0.0,
-            width: (frame.size.width * scale) as f32,
-            height: (frame.size.height * scale) as f32,
-        }
-    }
-
-    /// Convert an NSEvent location to Metal pixel coordinates (origin top-left).
-    fn event_to_pixel(&self, event: &NSEvent) -> (f32, f32) {
-        let location = event.locationInWindow();
-        let local: CGPoint = unsafe { msg_send![self, convertPoint: location, fromView: std::ptr::null::<objc2::runtime::AnyObject>()] };
-        let frame = self.frame();
-        let scale = self.backing_scale();
-        let pixel_x = local.x as f32 * scale;
-        let pixel_y = (frame.size.height as f32 - local.y as f32) * scale;
-        (pixel_x, pixel_y)
-    }
-
-    /// Hit-test: find which pane is under the mouse event (in active tab).
-    fn pane_at_event(&self, event: &NSEvent) -> Option<(&Pane, PaneViewport)> {
-        let tabs = self.ivars().tabs.borrow();
-        let idx = self.ivars().active_tab.get();
-        let tab = tabs.get(idx)?;
-        let (px, py) = self.event_to_pixel(event);
-        // Viewport is already in screen space (x: -scroll_offset_x), so use px directly
-        let (pane, vp) = tab.tree.hit_test(px, py, self.panes_viewport_for_tab(tab))?;
-        Some((unsafe { &*(pane as *const Pane) }, vp))
-    }
-
-    /// Convert an NSEvent to a grid position within the given pane/viewport.
-    fn pixel_to_grid_in(&self, event: &NSEvent, pane: &Pane, vp: &PaneViewport) -> Option<GridPos> {
-        let renderer = self.ivars().renderer.get()?;
-        let (pixel_x, pixel_y) = self.event_to_pixel(event);
-
-        let renderer_r = renderer.read();
-        let (cell_w, cell_h) = renderer_r.cell_size();
-        drop(renderer_r);
-
-        let rel_x = pixel_x - vp.x - crate::renderer::PANE_H_PADDING;
-        let rel_y = pixel_y - vp.y;
-
-        let term = pane.terminal.read();
-        let y_offset = term.y_offset_rows();
-        let col = (rel_x / cell_w).floor() as i32;
-        let visible_row = (rel_y / cell_h).floor() as i32 - y_offset as i32;
-
-        if visible_row < 0 || col < 0 {
-            return None;
-        }
-        let col = (col as u16).min(term.cols.saturating_sub(1));
-        let visible_row = visible_row as usize;
-        if visible_row >= term.rows as usize {
-            return None;
-        }
-
-        let abs_line = (term.scrollback_len() as i64 - term.scroll_offset() as i64 + visible_row as i64) as usize;
-        Some(GridPos { line: abs_line, col })
-    }
-
-    /// Compute cols/rows for a pane viewport.
-    fn viewport_to_grid(&self, vp: &PaneViewport) -> (u16, u16) {
-        let renderer = self.ivars().renderer.get().unwrap();
-        let renderer_r = renderer.read();
-        let (cell_w, cell_h) = renderer_r.cell_size();
-        let status_bar = renderer_r.status_bar_enabled();
-        drop(renderer_r);
-
-        let cols = ((vp.width - 2.0 * crate::renderer::PANE_H_PADDING) / cell_w).floor().max(1.0) as u16;
-        let usable_h = if status_bar {
-            vp.height - cell_h
-        } else {
-            vp.height
-        };
-        let rows = (usable_h / cell_h).floor().max(1.0) as u16;
-        (cols, rows)
-    }
-
-    /// Create a new tab (Cmd+T).
-    fn do_new_tab(&self) {
-        let config = match self.ivars().config.get() {
-            Some(c) => c,
-            None => return,
+            y: pane_area_y,
+            width: viewport_w,
+            height: pane_area_h,
         };
 
-        // Get CWD from currently focused pane
+        if let Some(tab) = self.tabs.get(self.active_tab) {
+            tab.tree
+                .for_each_pane_with_viewport(total_vp, &mut |pane, vp| {
+                    let usable_h = vp.height - status_bar_h;
+                    let usable_w = vp.width - 2.0 * crate::renderer::PANE_H_PADDING;
+                    let cols = (usable_w / cell_w).floor().max(1.0) as u16;
+                    let rows = (usable_h / cell_h).floor().max(1.0) as u16;
+
+                    let mut term = pane.terminal.write();
+                    if term.cols != cols || term.rows != rows {
+                        term.resize(cols, rows);
+                        drop(term);
+                        pane.pty.resize(cols, rows);
+                    }
+                });
+        }
+    }
+
+    fn do_new_tab(&mut self) {
         let cwd = self.focused_pane().and_then(|p| p.cwd());
-
-        let tab = match Tab::new_with_cwd(config, cwd.as_deref()) {
-            Ok(t) => t,
-            Err(e) => {
-                log::error!("failed to create tab: {}", e);
-                return;
+        match crate::pane::Tab::new_with_cwd(&self.config, cwd.as_deref()) {
+            Ok(tab) => {
+                self.tabs.push(tab);
+                self.active_tab = self.tabs.len() - 1;
+                self.resize_all_panes();
             }
-        };
-
-        let mut tabs = self.ivars().tabs.borrow_mut();
-        tabs.push(tab);
-        let new_idx = tabs.len() - 1;
-        log::debug!("New tab created: index={}, total={}", new_idx, tabs.len());
-        drop(tabs);
-        self.ivars().active_tab.set(new_idx);
-        self.resize_all_panes();
+            Err(e) => log::error!("Failed to create tab: {}", e),
+        }
     }
 
-    /// Switch to tab at index.
-    fn do_switch_tab(&self, idx: usize) {
-        let tabs = self.ivars().tabs.borrow();
-        if idx >= tabs.len() || idx == self.ivars().active_tab.get() {
-            return;
+    fn do_close_pane_or_tab(&mut self) {
+        if let Some(tab) = self.tabs.get(self.active_tab) {
+            let focused = tab.focused_pane;
+            self.close_pane(focused);
         }
-        log::debug!("Switch to tab {}", idx);
-        // Mark all panes of new tab dirty so the next render tick draws them
-        tabs[idx].tree.for_each_pane(&mut |pane| {
-            pane.terminal.read().dirty.store(true, std::sync::atomic::Ordering::Relaxed);
-        });
-        drop(tabs);
-        self.ivars().active_tab.set(idx);
-        // Clear bell/attention indicator on the newly focused tab
-        {
-            let mut tabs = self.ivars().tabs.borrow_mut();
-            tabs[idx].clear_bell();
-        }
-        // Lazy resize: resize panes when switching to them
-        self.resize_all_panes();
     }
 
-    /// Show a context menu to pick a color for a tab.
-    fn show_tab_color_menu(&self, event: &NSEvent, tab_idx: usize) {
-        use objc2_app_kit::{NSMenu, NSMenuItem};
-
-        self.ivars().color_menu_tab.set(tab_idx);
-        let mtm = unsafe { MainThreadMarker::new_unchecked() };
-        let pastilles = ["🔴", "🟠", "🟡", "🟢", "🔵", "🟣"];
-        let menu = NSMenu::new(mtm);
-        let action = objc2::sel!(tabColorSelected:);
-        let empty_ke = NSString::from_str("");
-
-        for (i, emoji) in pastilles.iter().enumerate() {
-            let title = NSString::from_str(emoji);
-            let item = unsafe {
-                NSMenuItem::initWithTitle_action_keyEquivalent(
-                    NSMenuItem::alloc(mtm),
-                    &title,
-                    Some(action),
-                    &empty_ke,
-                )
-            };
-            item.setTag(i as isize);
-            unsafe { item.setTarget(Some(&*self)) };
-            menu.addItem(&item);
-        }
-
-        // Separator + "Aucune" item
-        menu.addItem(&NSMenuItem::separatorItem(mtm));
-        let none_title = NSString::from_str("Aucune");
-        let none_item = unsafe {
-            NSMenuItem::initWithTitle_action_keyEquivalent(
-                NSMenuItem::alloc(mtm),
-                &none_title,
-                Some(action),
-                &empty_ke,
-            )
-        };
-        none_item.setTag(-1);
-        unsafe { none_item.setTarget(Some(&*self)) };
-        menu.addItem(&none_item);
-
-        // Show menu at click location (synchronous, blocks until user picks or dismisses)
-        let location = event.locationInWindow();
-        let _ok: bool = unsafe {
-            objc2::msg_send![&menu, popUpMenuPositioningItem: std::ptr::null::<NSMenuItem>(), atLocation: location, inView: self]
-        };
-    }
-
-    /// Switch to relative tab (delta = -1 for prev, +1 for next).
-    fn do_switch_tab_relative(&self, delta: i32) {
-        let tabs = self.ivars().tabs.borrow();
-        let count = tabs.len();
-        if count <= 1 {
-            return;
-        }
-        drop(tabs);
-        let current = self.ivars().active_tab.get() as i32;
-        let new_idx = ((current + delta) % count as i32 + count as i32) as usize % count;
-        self.do_switch_tab(new_idx);
-    }
-
-    /// Split the focused pane in the given direction.
-    fn do_split(&self, direction: SplitDirection) {
-        let config = match self.ivars().config.get() {
-            Some(c) => c,
-            None => return,
-        };
-
-        let (focused_id, current_vp, focused_cwd) = {
-            let tabs = self.ivars().tabs.borrow();
-            let idx = self.ivars().active_tab.get();
-            let tab = match tabs.get(idx) {
-                Some(t) => t,
-                None => return,
-            };
-            let fid = tab.focused_pane;
-            let vp = match tab.tree.viewport_for_pane(fid, self.panes_viewport_for_tab(tab)) {
-                Some(vp) => vp,
-                None => return,
-            };
-            let cwd = tab.tree.pane(fid).and_then(|p| p.cwd());
-            (fid, vp, cwd)
-        };
-
-        let half_vp = match direction {
-            SplitDirection::Horizontal => PaneViewport {
-                x: current_vp.x,
-                y: current_vp.y,
-                width: current_vp.width / 2.0,
-                height: current_vp.height,
-            },
-            SplitDirection::Vertical => PaneViewport {
-                x: current_vp.x,
-                y: current_vp.y,
-                width: current_vp.width,
-                height: current_vp.height / 2.0,
-            },
-        };
-        let (cols, rows) = self.viewport_to_grid(&half_vp);
-
-        let dir_name = match direction {
-            SplitDirection::Horizontal => "horizontal",
-            SplitDirection::Vertical => "vertical",
-        };
-        log::debug!("Split pane {}: direction={}, new size={}x{}", focused_id, dir_name, cols, rows);
-
-        let new_pane = match Pane::spawn(cols, rows, config, focused_cwd.as_deref()) {
-            Ok(p) => p,
-            Err(e) => {
-                log::error!("failed to spawn pane for split: {}", e);
-                return;
-            }
-        };
-        let new_id = new_pane.id;
-
-        let mut tabs = self.ivars().tabs.borrow_mut();
-        let idx = self.ivars().active_tab.get();
-        if let Some(tab) = tabs.get_mut(idx) {
-            let tree = std::mem::replace(&mut tab.tree, SplitTree::Leaf(Pane::spawn(1, 1, config, None).unwrap()));
-            tab.tree = tree.with_split(focused_id, new_pane, direction);
-            tab.tree.equalize();
-            tab.focused_pane = new_id;
-            // Auto-scroll to reveal the new pane
-            let panes_vp = self.panes_viewport_for_tab(tab);
-            if let Some(vp) = tab.tree.viewport_for_pane(new_id, panes_vp) {
-                tab.scroll_to_reveal(&vp, self.drawable_viewport().width);
-            }
-        }
-        drop(tabs);
-
-        self.resize_all_panes();
-    }
-
-    /// Split at the root level: the new pane spans the full width/height.
-    fn do_split_root(&self, direction: SplitDirection) {
-        let config = match self.ivars().config.get() {
-            Some(c) => c,
-            None => return,
-        };
-
-        let focused_cwd = {
-            let tabs = self.ivars().tabs.borrow();
-            let idx = self.ivars().active_tab.get();
-            tabs.get(idx).and_then(|tab| {
-                tab.tree.pane(tab.focused_pane).and_then(|p| p.cwd())
-            })
-        };
-
-        let panes_vp = self.panes_viewport();
-        let half_vp = match direction {
-            SplitDirection::Horizontal => PaneViewport {
-                x: panes_vp.x,
-                y: panes_vp.y,
-                width: panes_vp.width / 2.0,
-                height: panes_vp.height,
-            },
-            SplitDirection::Vertical => PaneViewport {
-                x: panes_vp.x,
-                y: panes_vp.y,
-                width: panes_vp.width,
-                height: panes_vp.height / 2.0,
-            },
-        };
-        let (cols, rows) = self.viewport_to_grid(&half_vp);
-
-        let dir_name = match direction {
-            SplitDirection::Horizontal => "horizontal",
-            SplitDirection::Vertical => "vertical",
-        };
-        log::debug!("Split root: direction={}, new size={}x{}", dir_name, cols, rows);
-
-        let new_pane = match Pane::spawn(cols, rows, config, focused_cwd.as_deref()) {
-            Ok(p) => p,
-            Err(e) => {
-                log::error!("failed to spawn pane for root split: {}", e);
-                return;
-            }
-        };
-        let new_id = new_pane.id;
-
-        let mut tabs = self.ivars().tabs.borrow_mut();
-        let idx = self.ivars().active_tab.get();
-        if let Some(tab) = tabs.get_mut(idx) {
-            let old_tree = std::mem::replace(&mut tab.tree, SplitTree::Leaf(Pane::spawn(1, 1, config, None).unwrap()));
-            tab.tree = match direction {
-                SplitDirection::Horizontal => SplitTree::HSplit {
-                    left: Box::new(old_tree),
-                    right: Box::new(SplitTree::Leaf(new_pane)),
-                    ratio: 0.5,
-                    root: true,
-                },
-                SplitDirection::Vertical => SplitTree::VSplit {
-                    top: Box::new(old_tree),
-                    bottom: Box::new(SplitTree::Leaf(new_pane)),
-                    ratio: 0.5,
-                    root: true,
-                },
-            };
-            tab.tree.equalize();
-            tab.focused_pane = new_id;
-            if direction == SplitDirection::Horizontal {
-                // Auto-scroll to reveal the new pane (rightmost)
-                let full = self.drawable_viewport();
-                let min_w = self.min_split_width_px();
-                let vw = tab.virtual_width(full.width, min_w);
-                if vw > full.width {
-                    tab.scroll_offset_x = (vw - full.width).max(0.0);
-                }
-            }
-        }
-        drop(tabs);
-
-        self.resize_all_panes();
-    }
-
-    /// Close focused pane. If it's the last pane in the tab, close the tab.
-    fn do_close_pane_or_tab(&self) {
-        // Collect info for confirmation dialog BEFORE holding the borrow,
-        // because NSAlert runs a modal run loop that can dispatch events
-        // which access tabs → would panic on double borrow.
-        let proc = {
-            let tabs = self.ivars().tabs.borrow();
-            let idx = self.ivars().active_tab.get();
-            if idx >= tabs.len() {
-                return;
-            }
-            tabs[idx].tree.pane(tabs[idx].focused_pane)
-                .and_then(|p| p.foreground_process_name().map(|name| (tabs[idx].title(), name)))
-        };
-        if let Some(proc) = proc {
-            let mtm = unsafe { MainThreadMarker::new_unchecked() };
-            if !confirm_running_processes(mtm, &[proc], "Close this pane?", "Close") {
-                return;
-            }
-        }
-
-        let mut tabs = self.ivars().tabs.borrow_mut();
-        let idx = self.ivars().active_tab.get();
-        if idx >= tabs.len() {
+    fn close_pane(&mut self, pane_id: PaneId) {
+        if self.active_tab >= self.tabs.len() {
             return;
         }
 
-        let is_single_pane = matches!(tabs[idx].tree, SplitTree::Leaf(_));
+        let Tab { tree, mut focused_pane, id, custom_title, color, has_bell, scroll_offset_x, virtual_width_override } =
+            self.tabs.remove(self.active_tab);
 
-        if is_single_pane {
-            // Close the tab
-            log::debug!("Closing tab {}", idx);
-            tabs.remove(idx);
-            if tabs.is_empty() {
-                drop(tabs);
-                unsafe {
-                    let mtm = MainThreadMarker::new_unchecked();
-                    let app = NSApplication::sharedApplication(mtm);
-                    app.terminate(None);
-                }
-                return;
-            }
-            let new_idx = if idx >= tabs.len() { tabs.len() - 1 } else { idx };
-            drop(tabs);
-            self.ivars().active_tab.set(new_idx);
-            self.resize_all_panes();
-            return;
-        }
-
-        // Multiple panes → close focused pane
-        let focused_id = tabs[idx].focused_pane;
-        log::debug!("Closing pane {} in tab {}", focused_id, idx);
-
-        // Find a neighbor to focus before removing (prefer right, then left, then any)
-        let panes_vp = self.panes_viewport_for_tab(&tabs[idx]);
-        let next_focus = tabs[idx].tree.neighbor(focused_id, NavDirection::Right, panes_vp)
-            .or_else(|| tabs[idx].tree.neighbor(focused_id, NavDirection::Left, panes_vp))
-            .or_else(|| tabs[idx].tree.neighbor(focused_id, NavDirection::Down, panes_vp))
-            .or_else(|| tabs[idx].tree.neighbor(focused_id, NavDirection::Up, panes_vp));
-
-        let config = self.ivars().config.get().unwrap();
-        let old_columns = tabs[idx].tree.chain_count(true, false);
-        let dummy = Pane::spawn(1, 1, config, None).unwrap();
-        let tree = std::mem::replace(&mut tabs[idx].tree, SplitTree::Leaf(dummy));
-        match tree.remove_pane(focused_id) {
+        match tree.remove_pane(pane_id) {
             Some(new_tree) => {
-                let new_focus = next_focus
-                    .filter(|id| new_tree.contains(*id))
-                    .unwrap_or_else(|| new_tree.first_pane().id);
-                tabs[idx].focused_pane = new_focus;
-                let mut new_tree = new_tree;
-                new_tree.equalize();
-                let new_columns = new_tree.chain_count(true, false);
-                tabs[idx].scale_virtual_width(old_columns, new_columns);
-                tabs[idx].tree = new_tree;
-                // Clamp scroll and auto-scroll to reveal focused pane
-                let full = self.drawable_viewport();
-                let min_w = self.min_split_width_px();
-                tabs[idx].clamp_scroll(full.width, min_w);
-                let tab = &mut tabs[idx];
-                let panes_vp = self.panes_viewport_for_tab(tab);
-                if let Some(vp) = tab.tree.viewport_for_pane(new_focus, panes_vp) {
-                    tab.scroll_to_reveal(&vp, full.width);
+                if new_tree.pane(focused_pane).is_none() {
+                    focused_pane = new_tree.first_pane().id;
                 }
+                self.tabs.insert(self.active_tab, Tab {
+                    id, tree: new_tree, focused_pane, custom_title, color, has_bell, scroll_offset_x, virtual_width_override,
+                });
+                self.resize_all_panes();
             }
             None => {
-                // Tab became empty (shouldn't happen given check above)
-                tabs.remove(idx);
-                if tabs.is_empty() {
-                    drop(tabs);
-                    unsafe {
-                        let mtm = MainThreadMarker::new_unchecked();
-                        let app = NSApplication::sharedApplication(mtm);
-                        app.terminate(None);
-                    }
-                    return;
+                // Tab has no more panes
+                if self.tabs.is_empty() {
+                    self.closing = true;
+                } else {
+                    self.active_tab = self.active_tab.min(self.tabs.len() - 1);
+                    self.resize_all_panes();
                 }
-                let new_idx = if idx >= tabs.len() { tabs.len() - 1 } else { idx };
-                self.ivars().active_tab.set(new_idx);
             }
         }
-        drop(tabs);
+    }
+
+    fn do_split(&mut self, direction: SplitDirection) {
+        if self.active_tab >= self.tabs.len() {
+            return;
+        }
+        let Tab { tree, mut focused_pane, id, custom_title, color, has_bell, scroll_offset_x, virtual_width_override } =
+            self.tabs.remove(self.active_tab);
+        let cwd = tree.pane(focused_pane).and_then(|p| p.cwd());
+        let new_tree = match Pane::spawn(
+            self.config.terminal.columns,
+            self.config.terminal.rows,
+            &self.config,
+            cwd.as_deref(),
+        ) {
+            Ok(new_pane) => {
+                let old_focused = focused_pane;
+                focused_pane = new_pane.id;
+                tree.with_split(old_focused, new_pane, direction)
+            }
+            Err(e) => {
+                log::error!("Failed to spawn pane: {}", e);
+                tree
+            }
+        };
+        self.tabs.insert(self.active_tab, Tab {
+            id, tree: new_tree, focused_pane, custom_title, color, has_bell, scroll_offset_x, virtual_width_override,
+        });
         self.resize_all_panes();
     }
 
-    /// Close the active window (all its tabs). The timer will detect
-    /// the empty tab list and remove the window. App terminates when
-    /// the last window is closed (via `applicationShouldTerminateAfterLastWindowClosed`).
-    fn do_close_window(&self) {
-        // Check for running processes and confirm
-        let procs = self.running_processes();
-        let mtm = unsafe { MainThreadMarker::new_unchecked() };
-        if !confirm_running_processes(mtm, &procs, "Close this window?", "Close") {
+    fn do_split_root(&mut self, direction: SplitDirection) {
+        if self.active_tab >= self.tabs.len() {
             return;
         }
-        // Signal closing — tick() will return false and the timer will close the window
-        self.ivars().closing.set(true);
-    }
-
-    /// Kill the active window immediately without saving its session.
-    fn do_kill_window(&self) {
-        self.ivars().skip_session_save.set(true);
-        self.ivars().closing.set(true);
-    }
-
-    /// Whether this window should be excluded from session save.
-    pub fn skip_session_save(&self) -> bool {
-        self.ivars().skip_session_save.get()
-    }
-
-    /// Detach the active tab to a new window.
-    /// No-op if only one tab remains.
-    fn do_detach_tab(&self) {
-        let mut tabs = self.ivars().tabs.borrow_mut();
-        if tabs.len() <= 1 {
-            log::debug!("do_detach_tab: only {} tab(s), ignoring", tabs.len());
-            return;
-        }
-        let idx = self.ivars().active_tab.get();
-        if idx >= tabs.len() {
-            return;
-        }
-        let tab = tabs.remove(idx);
-        let new_idx = if idx >= tabs.len() { tabs.len() - 1 } else { idx };
-        self.ivars().active_tab.set(new_idx);
-        drop(tabs);
-        self.resize_all_panes();
-
-        let source_frame = self.window().map(|w| w.frame());
-        let mtm = unsafe { MainThreadMarker::new_unchecked() };
-        crate::app::detach_tab_to_new_window(mtm, tab, source_frame);
-    }
-
-    /// Merge all tabs from this window into another window.
-    /// No-op if this is the only window.
-    fn do_merge_window(&self) {
-        let mtm = unsafe { MainThreadMarker::new_unchecked() };
-        let source = self.window().unwrap();
-        // Check+merge in one call; tabs are only drained if a target exists
-        if !crate::app::merge_tabs_from(mtm, &self.ivars().tabs, &source) {
-            log::debug!("do_merge_window: no other window, ignoring");
-            return;
-        }
-        self.ivars().skip_session_save.set(true);
-        self.ivars().closing.set(true);
-    }
-
-    /// Append external tabs (used by merge window).
-    pub fn append_tabs(&self, new_tabs: Vec<crate::pane::Tab>) {
-        let mut tabs = self.ivars().tabs.borrow_mut();
-        let first_new = tabs.len();
-        tabs.extend(new_tabs);
-        drop(tabs);
-        self.ivars().active_tab.set(first_new);
+        let Tab { tree, mut focused_pane, id, custom_title, color, has_bell, scroll_offset_x, virtual_width_override } =
+            self.tabs.remove(self.active_tab);
+        let cwd = tree.pane(focused_pane).and_then(|p| p.cwd());
+        let mut new_tree = match Pane::spawn(
+            self.config.terminal.columns,
+            self.config.terminal.rows,
+            &self.config,
+            cwd.as_deref(),
+        ) {
+            Ok(new_pane) => {
+                focused_pane = new_pane.id;
+                match direction {
+                    SplitDirection::Horizontal => SplitTree::HSplit {
+                        left: Box::new(tree),
+                        right: Box::new(SplitTree::Leaf(new_pane)),
+                        ratio: 0.5,
+                        root: true,
+                    },
+                    SplitDirection::Vertical => SplitTree::VSplit {
+                        top: Box::new(tree),
+                        bottom: Box::new(SplitTree::Leaf(new_pane)),
+                        ratio: 0.5,
+                        root: true,
+                    },
+                }
+            }
+            Err(e) => {
+                log::error!("Failed to spawn pane: {}", e);
+                tree
+            }
+        };
+        new_tree.equalize();
+        self.tabs.insert(self.active_tab, Tab {
+            id, tree: new_tree, focused_pane, custom_title, color, has_bell, scroll_offset_x, virtual_width_override,
+        });
         self.resize_all_panes();
     }
 
-    /// Navigate focus to an adjacent pane.
-    fn do_navigate(&self, dir: NavDirection) {
-        let mut tabs = self.ivars().tabs.borrow_mut();
-        let idx = self.ivars().active_tab.get();
-        let tab = match tabs.get_mut(idx) {
+    fn do_switch_tab_relative(&mut self, delta: i32) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        let len = self.tabs.len() as i32;
+        let new_idx = ((self.active_tab as i32 + delta) % len + len) % len;
+        self.active_tab = new_idx as usize;
+        self.tabs[self.active_tab].clear_bell();
+        self.resize_all_panes();
+    }
+
+    fn do_navigate(&mut self, dir: NavDirection) {
+        let tab = match self.tabs.get(self.active_tab) {
             Some(t) => t,
             None => return,
         };
-        let focused_id = tab.focused_pane;
-        let panes_vp = self.panes_viewport_for_tab(tab);
-        if let Some(neighbor_id) = tab.tree.neighbor(focused_id, dir, panes_vp) {
-            tab.focused_pane = neighbor_id;
-            if let Some(old) = tab.tree.pane(focused_id) {
-                old.terminal.read().dirty.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-            if let Some(new) = tab.tree.pane(neighbor_id) {
-                new.terminal.read().dirty.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-            // Auto-scroll to reveal the newly focused pane
-            if let Some(vp) = tab.tree.viewport_for_pane(neighbor_id, panes_vp) {
-                tab.scroll_to_reveal(&vp, self.drawable_viewport().width);
-            }
-        } else {
-            // No neighbor in this direction → overflow to adjacent tab
-            let count = tabs.len();
-            if count <= 1 {
-                return;
-            }
-            drop(tabs);
-            let delta: i32 = match dir {
-                NavDirection::Left | NavDirection::Up => -1,
-                NavDirection::Right | NavDirection::Down => 1,
-            };
-            self.do_switch_tab_relative(delta);
-            // Focus the appropriate pane in the new tab:
-            // going right/down → first pane, going left/up → last pane
-            let mut tabs = self.ivars().tabs.borrow_mut();
-            let new_idx = self.ivars().active_tab.get();
-            if let Some(new_tab) = tabs.get_mut(new_idx) {
-                let target_id = match dir {
-                    NavDirection::Right | NavDirection::Down => new_tab.tree.first_pane().id,
-                    NavDirection::Left | NavDirection::Up => new_tab.tree.last_pane().id,
-                };
-                new_tab.focused_pane = target_id;
-                // Auto-scroll to reveal the focused pane in the new tab
-                let panes_vp = self.panes_viewport_for_tab(new_tab);
-                if let Some(vp) = new_tab.tree.viewport_for_pane(target_id, panes_vp) {
-                    new_tab.scroll_to_reveal(&vp, self.drawable_viewport().width);
-                }
+
+        let size = self.window.inner_size();
+        let (cell_w, cell_h) = self.renderer.cell_size();
+        let tab_bar_h = if self.tabs.len() > 1 { (cell_h * 2.0).round() } else { 0.0 };
+        let global_bar_h = cell_h;
+        let total_vp = PaneViewport {
+            x: 0.0,
+            y: tab_bar_h,
+            width: size.width as f32,
+            height: size.height as f32 - tab_bar_h - global_bar_h,
+        };
+
+        if let Some(neighbor) = tab.tree.neighbor(tab.focused_pane, dir, total_vp) {
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                tab.focused_pane = neighbor;
             }
         }
     }
 
-    /// Swap the focused pane with its neighbor in the given direction.
-    fn do_swap_pane(&self, dir: NavDirection) {
-        let mut tabs = self.ivars().tabs.borrow_mut();
-        let idx = self.ivars().active_tab.get();
-        let tab = match tabs.get_mut(idx) {
-            Some(t) => t,
-            None => return,
+    fn do_swap_pane(&mut self, dir: NavDirection) {
+        let size = self.window.inner_size();
+        let (cell_w, cell_h) = self.renderer.cell_size();
+        let tab_bar_h = if self.tabs.len() > 1 { (cell_h * 2.0).round() } else { 0.0 };
+        let global_bar_h = cell_h;
+        let total_vp = PaneViewport {
+            x: 0.0,
+            y: tab_bar_h,
+            width: size.width as f32,
+            height: size.height as f32 - tab_bar_h - global_bar_h,
         };
-        let focused_id = tab.focused_pane;
-        let vp = self.panes_viewport_for_tab(tab);
-        if let Some(neighbor_id) = tab.tree.neighbor(focused_id, dir, vp) {
-            if tab.tree.swap_panes(focused_id, neighbor_id) {
-                // Mark both panes dirty so they redraw in their new positions
-                if let Some(p) = tab.tree.pane(focused_id) {
-                    p.terminal.read().dirty.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-                if let Some(p) = tab.tree.pane(neighbor_id) {
-                    p.terminal.read().dirty.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-                drop(tabs);
+
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            let focused = tab.focused_pane;
+            if let Some(neighbor) = tab.tree.neighbor(focused, dir, total_vp) {
+                tab.tree.swap_panes(focused, neighbor);
                 self.resize_all_panes();
             }
         }
     }
 
-    /// Resize all panes in the active tab to match their current viewports.
-    fn resize_all_panes(&self) {
-        let renderer = match self.ivars().renderer.get() {
-            Some(r) => r,
-            None => return,
-        };
-        let renderer_r = renderer.read();
-        let (cell_w, cell_h) = renderer_r.cell_size();
-        let status_bar = renderer_r.status_bar_enabled();
-        drop(renderer_r);
-
-        let panes_vp = self.panes_viewport();
-        let tabs = self.ivars().tabs.borrow();
-        let idx = self.ivars().active_tab.get();
-        if let Some(tab) = tabs.get(idx) {
-            tab.tree.for_each_pane_with_viewport(panes_vp, &mut |pane, vp| {
-                let cols = ((vp.width - 2.0 * crate::renderer::PANE_H_PADDING) / cell_w).floor().max(1.0) as u16;
-                let usable_h = if status_bar { vp.height - cell_h } else { vp.height };
-                let rows = (usable_h / cell_h).floor().max(1.0) as u16;
-                let mut term = pane.terminal.write();
-                if cols != term.cols || rows != term.rows {
-                    term.resize(cols, rows);
-                    drop(term);
-                    pane.pty.resize(cols, rows);
-                }
-            });
-        }
-    }
-
-    fn mark_dirty(&self) {
-        if let Some(pane) = self.focused_pane() {
-            pane.terminal.read().dirty.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-
-    fn toggle_filter(&self) {
-        let mut filter = self.ivars().filter.borrow_mut();
-        if filter.is_some() {
-            *filter = None;
+    fn toggle_filter(&mut self) {
+        if self.filter.is_some() {
+            self.filter = None;
         } else {
-            *filter = Some(FilterState {
+            self.filter = Some(FilterState {
                 query: String::new(),
                 matches: Vec::new(),
             });
         }
-        drop(filter);
-        // Mark dirty to trigger redraw
-        if let Some(pane) = self.focused_pane() {
-            pane.terminal.read().dirty.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
     }
 
-    fn handle_filter_key(&self, event: &NSEvent) {
-        let chars = event.charactersIgnoringModifiers();
-        let ch_str = chars.map(|s| s.to_string()).unwrap_or_default();
-        let ch = ch_str.chars().next().unwrap_or('\0');
-
-        let mut filter = self.ivars().filter.borrow_mut();
-        let state = match filter.as_mut() {
-            Some(s) => s,
+    fn update_filter_matches(&mut self) {
+        let query = match self.filter {
+            Some(ref f) => f.query.clone(),
             None => return,
         };
 
-        match ch {
-            '\u{1B}' => {
-                // Escape → close filter without scrolling
-                *filter = None;
-                drop(filter);
-                if let Some(pane) = self.focused_pane() {
-                    pane.terminal.read().dirty.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-                return;
-            }
-            '\r' => {
-                // Enter → close filter and scroll to first match
-                let first_match = state.matches.first().map(|m| m.abs_line);
-                *filter = None;
-                drop(filter);
-                if let Some(abs_line) = first_match {
-                    if let Some(pane) = self.focused_pane() {
-                        let mut term = pane.terminal.write();
-                        term.scroll_to_abs_line(abs_line);
-                    }
-                }
-                return;
-            }
-            '\u{7F}' | '\u{08}' => {
-                // Backspace
-                state.query.pop();
-            }
-            c if c >= ' ' && !c.is_control() => {
-                state.query.push(c);
-            }
-            _ => return,
-        }
-
-        // Re-run search
-        if let Some(pane) = self.focused_pane() {
+        let matches = if let Some(pane) = self.focused_pane() {
             let term = pane.terminal.read();
-            state.matches = term.search_lines(&state.query);
-            term.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-
-    fn start_rename_tab(&self) {
-        // Pre-fill with current tab title
-        let current_title = {
-            let tabs = self.ivars().tabs.borrow();
-            let idx = self.ivars().active_tab.get();
-            tabs.get(idx).map(|t| t.title()).unwrap_or_default()
-        };
-        *self.ivars().rename_tab.borrow_mut() = Some(RenameTabState {
-            input: current_title,
-        });
-        self.mark_dirty();
-    }
-
-    fn handle_rename_tab_key(&self, event: &NSEvent) {
-        let chars = event.charactersIgnoringModifiers();
-        let ch_str = chars.map(|s| s.to_string()).unwrap_or_default();
-        let ch = ch_str.chars().next().unwrap_or('\0');
-
-        let mut rename = self.ivars().rename_tab.borrow_mut();
-        let state = match rename.as_mut() {
-            Some(s) => s,
-            None => return,
-        };
-
-        match ch {
-            '\u{1B}' => {
-                // Escape → cancel rename
-                *rename = None;
-                drop(rename);
-                self.mark_dirty();
-                return;
-            }
-            '\r' => {
-                // Enter → apply rename (empty = reset to auto)
-                let new_title = if state.input.trim().is_empty() {
-                    None
-                } else {
-                    Some(state.input.clone())
-                };
-                *rename = None;
-                drop(rename);
-                let mut tabs = self.ivars().tabs.borrow_mut();
-                let idx = self.ivars().active_tab.get();
-                if let Some(tab) = tabs.get_mut(idx) {
-                    tab.custom_title = new_title;
-                }
-                drop(tabs);
-                self.mark_dirty();
-                return;
-            }
-            '\u{7F}' | '\u{08}' => {
-                // Backspace
-                state.input.pop();
-            }
-            c if c >= ' ' && !c.is_control() => {
-                state.input.push(c);
-            }
-            _ => return,
-        }
-        drop(rename);
-        self.mark_dirty();
-    }
-
-    fn start_rename_pane(&self) {
-        let current_title = {
-            let tabs = self.ivars().tabs.borrow();
-            let idx = self.ivars().active_tab.get();
-            tabs.get(idx).and_then(|tab| {
-                let pane = tab.tree.pane(tab.focused_pane)?;
-                if let Some(ref custom) = pane.custom_title {
-                    Some(custom.clone())
-                } else {
-                    pane.terminal.read().title.clone()
-                }
-            }).unwrap_or_default()
-        };
-        *self.ivars().rename_pane.borrow_mut() = Some(RenamePaneState {
-            input: current_title,
-        });
-        self.mark_dirty();
-    }
-
-    fn handle_rename_pane_key(&self, event: &NSEvent) {
-        let chars = event.charactersIgnoringModifiers();
-        let ch_str = chars.map(|s| s.to_string()).unwrap_or_default();
-        let ch = ch_str.chars().next().unwrap_or('\0');
-
-        let mut rename = self.ivars().rename_pane.borrow_mut();
-        let state = match rename.as_mut() {
-            Some(s) => s,
-            None => return,
-        };
-
-        match ch {
-            '\u{1B}' => {
-                // Escape → cancel rename
-                *rename = None;
-                drop(rename);
-                self.mark_dirty();
-                return;
-            }
-            '\r' => {
-                // Enter → apply rename (empty = reset to auto)
-                let new_title = if state.input.trim().is_empty() {
-                    None
-                } else {
-                    Some(state.input.clone())
-                };
-                *rename = None;
-                drop(rename);
-                let mut tabs = self.ivars().tabs.borrow_mut();
-                let idx = self.ivars().active_tab.get();
-                if let Some(tab) = tabs.get_mut(idx) {
-                    if let Some(pane) = tab.tree.pane_mut(tab.focused_pane) {
-                        pane.custom_title = new_title;
-                    }
-                }
-                drop(tabs);
-                self.mark_dirty();
-                return;
-            }
-            '\u{7F}' | '\u{08}' => {
-                // Backspace
-                state.input.pop();
-            }
-            c if c >= ' ' && !c.is_control() => {
-                state.input.push(c);
-            }
-            _ => return,
-        }
-        drop(rename);
-        self.mark_dirty();
-    }
-
-    fn handle_filter_click(&self, _px: f32, py: f32) {
-        let renderer = match self.ivars().renderer.get() {
-            Some(r) => r,
-            None => return,
-        };
-        let (_, cell_h) = renderer.read().cell_size();
-
-        // The overlay starts with: 1 row search bar + matches below
-        let match_start_y = {
-            let panes_vp = self.panes_viewport();
-            panes_vp.y + cell_h // search bar takes 1 row
-        };
-
-        let click_row = ((py - match_start_y) / cell_h).floor() as i32;
-        if click_row < 0 {
-            return;
-        }
-
-        let mut filter = self.ivars().filter.borrow_mut();
-        let abs_line = match filter.as_ref() {
-            Some(state) => {
-                let idx = click_row as usize;
-                state.matches.get(idx).map(|m| m.abs_line)
-            }
-            None => return,
-        };
-
-        *filter = None;
-        drop(filter);
-
-        if let Some(abs_line) = abs_line {
-            if let Some(pane) = self.focused_pane() {
-                let mut term = pane.terminal.write();
-                term.scroll_to_abs_line(abs_line);
-            }
-        }
-    }
-
-    fn handle_resize(&self) {
-        let Some(layer) = self.ivars().metal_layer.get() else { return };
-        let Some(renderer) = self.ivars().renderer.get() else { return };
-
-        let scale = self.window().map_or(2.0, |w| w.backingScaleFactor());
-        let frame = self.frame();
-        layer.setContentsScale(scale);
-        layer.setDrawableSize(CGSize {
-            width: frame.size.width * scale,
-            height: frame.size.height * scale,
-        });
-
-        // Rebuild glyph atlas if scale changed (e.g. moved to different display)
-        if (scale - self.ivars().last_scale.get()).abs() > 0.01 {
-            log::debug!("Scale changed: {} -> {}", self.ivars().last_scale.get(), scale);
-            self.ivars().last_scale.set(scale);
-            renderer.write().rebuild_atlas(scale);
-        }
-
-        self.resize_all_panes();
-    }
-
-    /// Returns (tab_title, process_name) for each pane with a running foreground process.
-    pub fn running_processes(&self) -> Vec<(String, String)> {
-        let tabs = self.ivars().tabs.borrow();
-        let mut result = Vec::new();
-        for tab in tabs.iter() {
-            let title = tab.title();
-            tab.tree.for_each_pane(&mut |pane| {
-                if let Some(name) = pane.foreground_process_name() {
-                    result.push((title.clone(), name));
-                }
-            });
-        }
-        result
-    }
-
-    /// Append this window's session data to the given Vec.
-    /// Called by AppDelegate to collect all windows before saving.
-    pub fn append_session_data(&self, out: &mut Vec<crate::session::WindowSession>) {
-        let tabs = self.ivars().tabs.borrow();
-        let active_tab = self.ivars().active_tab.get();
-        let frame = self.window().map(|win| {
-            let f = win.frame();
-            (f.origin.x, f.origin.y, f.size.width, f.size.height)
-        });
-        out.push(crate::session::WindowSession::from_tabs(&tabs, active_tab, frame));
-    }
-
-    /// Initialize Metal rendering with the given tabs.
-    pub fn setup_metal(&self, _mtm: MainThreadMarker, config: &Config, tabs: Vec<Tab>, active_tab: usize) {
-        log::info!("Setting up Metal");
-        let device = MTLCreateSystemDefaultDevice()
-            .expect("no Metal device");
-
-        let layer = CAMetalLayer::new();
-        layer.setDevice(Some(&device));
-        layer.setPixelFormat(objc2_metal::MTLPixelFormat::BGRA8Unorm);
-        layer.setFramebufferOnly(true);
-
-        let frame = self.frame();
-        let scale = if let Some(window) = self.window() {
-            window.backingScaleFactor()
+            term.search_lines(&query)
         } else {
-            2.0
+            return;
         };
-        layer.setContentsScale(scale);
-        layer.setDrawableSize(CGSize {
-            width: frame.size.width * scale,
-            height: frame.size.height * scale,
-        });
-
-        self.setWantsLayer(true);
-        self.setLayer(Some(&layer));
-        self.ivars().metal_layer.set(layer.clone()).ok();
-
-        self.ivars().last_scale.set(scale);
-
-        let terminal_for_renderer = tabs[active_tab].tree.first_pane().terminal.clone();
-
-        let renderer = Arc::new(parking_lot::RwLock::new(
-            Renderer::new(&device, &layer, terminal_for_renderer, scale, config),
-        ));
-
-        self.ivars().renderer.set(renderer).ok();
-        self.ivars().config.set(config.clone()).ok();
-        self.ivars().keybindings.set(Keybindings::from_config(&config.keys)).ok();
-        self.ivars().git_poll_interval.set(config.terminal.fps * 2);
-        *self.ivars().tabs.borrow_mut() = tabs;
-        self.ivars().active_tab.set(active_tab);
+        if let Some(ref mut f) = self.filter {
+            f.matches = matches;
+        }
     }
-
-    /// Called by the global render timer in AppDelegate for each window.
-    /// Handles all per-frame work: command injection, auto-scroll, git polling,
-    /// pane reaping, rendering, focus reporting, and window title updates.
-    /// Returns `false` if the window has no tabs left and should be closed.
-    pub fn tick(&self) -> bool {
-        let ivars = self.ivars();
-        if ivars.closing.get() {
-            return false;
-        }
-        let renderer = match ivars.renderer.get() {
-            Some(r) => r.clone(),
-            None => return true, // not yet initialized
-        };
-        let layer = match ivars.metal_layer.get() {
-            Some(l) => l.clone(),
-            None => return true,
-        };
-
-        // --- Inject pending commands for restored panes ---
-        {
-            let tabs = ivars.tabs.borrow();
-            for tab in tabs.iter() {
-                tab.tree.for_each_pane(&mut |pane| {
-                    pane.inject_pending_command();
-                });
-            }
-        }
-
-        // --- Auto-scroll during drag selection ---
-        {
-            let speed = ivars.auto_scroll_speed.get();
-            if speed != 0 {
-                let tabs = ivars.tabs.borrow();
-                let idx = ivars.active_tab.get();
-                if let Some(tab) = tabs.get(idx) {
-                    if let Some(pane) = tab.tree.pane(tab.focused_pane) {
-                        let mut term = pane.terminal.write();
-                        if term.selection.is_some() {
-                            term.scroll(-speed);
-                            let sb_len = term.scrollback_len();
-                            let scroll_off = term.scroll_offset();
-                            if speed < 0 {
-                                let first_visible = (sb_len as i64 - scroll_off as i64) as usize;
-                                if let Some(ref mut sel) = term.selection {
-                                    sel.end = crate::terminal::GridPos { line: first_visible, col: 0 };
-                                }
-                            } else {
-                                let last_visible = (sb_len as i64 - scroll_off as i64 + term.rows as i64 - 1) as usize;
-                                let last_col = term.cols.saturating_sub(1);
-                                if let Some(ref mut sel) = term.selection {
-                                    sel.end = crate::terminal::GridPos { line: last_visible, col: last_col };
-                                }
-                            }
-                            term.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
-                        }
-                    }
-                }
-            }
-        }
-
-        // --- Poll git branch for all panes with a CWD ---
-        let git_poll_interval = ivars.git_poll_interval.get();
-        let count = ivars.git_poll_counter.get() + 1;
-        ivars.git_poll_counter.set(count);
-        if count >= git_poll_interval {
-            ivars.git_poll_counter.set(0);
-            let tabs = ivars.tabs.borrow();
-            for tab in tabs.iter() {
-                tab.tree.for_each_pane(&mut |pane| {
-                    let term = pane.terminal.read();
-                    let cwd = term.cwd.clone();
-                    let old_branch = term.git_branch.clone();
-                    drop(term);
-                    if let Some(ref cwd) = cwd {
-                        let new_branch = crate::terminal::parser::resolve_git_branch(cwd);
-                        if new_branch != old_branch {
-                            let mut term = pane.terminal.write();
-                            term.git_branch = new_branch;
-                            term.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
-                        }
-                    }
-                });
-            }
-        }
-
-        // --- Reap exited panes across ALL tabs ---
-        let mut any_removed = false;
-        let mut tabs_to_remove: Vec<usize> = Vec::new();
-        {
-            let mut tabs = ivars.tabs.borrow_mut();
-            for (tab_idx, tab) in tabs.iter_mut().enumerate() {
-                let exited = tab.tree.exited_pane_ids();
-                if exited.is_empty() {
-                    continue;
-                }
-                any_removed = true;
-                log::debug!("Reaping exited panes in tab {}: {:?}", tab_idx, exited);
-                for id in &exited {
-                    let old_cols = tab.tree.chain_count(true, false);
-                    let tree = std::mem::replace(&mut tab.tree, SplitTree::Leaf(
-                        Pane::spawn(1, 1, ivars.config.get().unwrap(), None).unwrap()
-                    ));
-                    match tree.remove_pane(*id) {
-                        Some(mut new_tree) => {
-                            new_tree.equalize();
-                            let new_cols = new_tree.chain_count(true, false);
-                            tab.scale_virtual_width(old_cols, new_cols);
-                            tab.tree = new_tree;
-                        }
-                        None => {
-                            tabs_to_remove.push(tab_idx);
-                            break;
-                        }
-                    }
-                }
-                if exited.contains(&tab.focused_pane) {
-                    if !tabs_to_remove.contains(&tab_idx) {
-                        tab.focused_pane = tab.tree.first_pane().id;
-                    }
-                }
-            }
-            for &idx in tabs_to_remove.iter().rev() {
-                tabs.remove(idx);
-            }
-        }
-
-        // Adjust active_tab if needed; signal close if no tabs left
-        if any_removed {
-            let tabs = ivars.tabs.borrow();
-            if tabs.is_empty() {
-                drop(tabs);
-                return false;
-            }
-            let active = ivars.active_tab.get();
-            if active >= tabs.len() {
-                ivars.active_tab.set(tabs.len() - 1);
-            }
-        }
-
-        // Build pane render list from active tab only
-        let active_idx = ivars.active_tab.get();
-        let split_min_w = ivars.config.get()
-            .map(|c| c.splits.min_width)
-            .unwrap_or(300.0)
-            * ivars.last_scale.get().max(1.0) as f32;
-        let (pane_data, pty_ptr, focus_reporting, tab_titles, active_panes_vp, screen_width) = {
-            let mut tabs = ivars.tabs.borrow_mut();
-            if tabs.is_empty() {
-                return false;
-            }
-            let tab = &tabs[active_idx];
-            let focused_id = tab.focused_pane;
-
-            let mut pane_data: Vec<(Arc<parking_lot::RwLock<crate::terminal::TerminalState>>, PaneViewport, bool, bool, PaneId, Option<String>)> = Vec::new();
-            let cell_h = renderer.read().cell_size().1;
-            let tab_bar_h = (cell_h * 2.0).round();
-            let drawable_size = layer.drawableSize();
-            let screen_width = drawable_size.width as f32;
-            let virtual_width = tab.virtual_width(screen_width, split_min_w);
-            let global_bar_h = cell_h;
-            let panes_vp = PaneViewport {
-                x: -tab.scroll_offset_x,
-                y: tab_bar_h,
-                width: virtual_width,
-                height: drawable_size.height as f32 - tab_bar_h - global_bar_h,
-            };
-            tab.tree.for_each_pane_with_viewport(panes_vp, &mut |pane, vp| {
-                pane_data.push((
-                    pane.terminal.clone(),
-                    vp,
-                    pane.is_ready(),
-                    pane.id == focused_id,
-                    pane.id,
-                    pane.custom_title.clone(),
-                ));
-            });
-
-            // Override custom_title for focused pane when rename_pane is active
-            {
-                let rename_pane = ivars.rename_pane.borrow();
-                if let Some(ref rs) = *rename_pane {
-                    for entry in &mut pane_data {
-                        if entry.3 { // is_focused
-                            entry.5 = Some(format!("{}▏", rs.input));
-                        }
-                    }
-                }
-            }
-
-            let focused = tab.tree.pane(focused_id);
-            let pty_ptr = focused.map(|p| &p.pty as *const crate::terminal::pty::Pty);
-            let focus_reporting = focused.map_or(false, |p| p.terminal.read().focus_reporting);
-
-            for t in tabs.iter_mut() {
-                t.check_bell();
-            }
-            tabs[active_idx].clear_bell();
-
-            let rename = ivars.rename_tab.borrow();
-            let tab_titles: Vec<(String, bool, Option<usize>, bool, bool)> = tabs.iter().enumerate()
-                .map(|(i, t)| {
-                    let is_renaming = i == active_idx && rename.is_some();
-                    let title = if is_renaming {
-                        let rs = rename.as_ref().unwrap();
-                        format!("{}▏", rs.input)
-                    } else {
-                        t.title()
-                    };
-                    (title, i == active_idx, t.color, is_renaming, t.has_bell)
-                })
-                .collect();
-            drop(rename);
-            (pane_data, pty_ptr, focus_reporting, tab_titles, panes_vp, screen_width)
-        };
-
-        // Focus reporting (DEC mode 1004) — send to focused pane only
-        unsafe {
-            let mtm = MainThreadMarker::new_unchecked();
-            let app = NSApplication::sharedApplication(mtm);
-            let focused = app.isActive();
-            let prev = ivars.last_focused.get();
-            if focused != prev {
-                ivars.last_focused.set(focused);
-                if focus_reporting {
-                    if let Some(pty_ptr) = pty_ptr {
-                        let seq = if focused { b"\x1b[I" as &[u8] } else { b"\x1b[O" };
-                        (*pty_ptr).write(seq);
-                    }
-                }
-            }
-        }
-
-        // Update NSWindow title from focused pane's OSC 0/2
-        if let Some((terminal, _, _, _, _, _)) = pane_data.iter().find(|(_, _, _, f, _, _)| *f) {
-            let term = terminal.read();
-            let current = term.title.clone();
-            drop(term);
-            let mut prev = ivars.last_title.borrow_mut();
-            if current != *prev {
-                if let Some(win) = self.window() {
-                    let title_str = match current {
-                        Some(ref t) => format!("Kova — {}", t),
-                        None => "Kova".to_string(),
-                    };
-                    win.setTitle(&NSString::from_str(&title_str));
-                }
-                *prev = current;
-            }
-        }
-
-        // Collect split separators from active tab
-        let separators = {
-            let tabs = ivars.tabs.borrow();
-            if let Some(tab) = tabs.get(active_idx) {
-                let mut seps = Vec::new();
-                tab.tree.collect_separators(active_panes_vp, &mut seps);
-                seps
-            } else {
-                Vec::new()
-            }
-        };
-
-        // Build filter render data if active
-        let filter_data = {
-            let filter = ivars.filter.borrow();
-            filter.as_ref().map(|f| FilterRenderData {
-                query: f.query.clone(),
-                matches: f.matches.clone(),
-            })
-        };
-
-        // Compute left_inset from traffic light buttons
-        let left_inset = {
-            let inset = self.window()
-                .and_then(|win| {
-                    let scale = win.backingScaleFactor() as f32;
-                    win.standardWindowButton(NSWindowButton::ZoomButton)
-                        .map(|btn| {
-                            let frame = btn.frame();
-                            let right_edge = (frame.origin.x + frame.size.width) as f32;
-                            (right_edge + 8.0) * scale
-                        })
-                })
-                .unwrap_or(140.0);
-            ivars.tab_bar_left_inset.set(inset);
-            inset
-        };
-        let (hover_pos, hover_text, hover_pane_id) = {
-            let h = ivars.hovered_url.borrow();
-            (
-                h.as_ref().map(|(_, row, start, end, _)| (*row, *start, *end)),
-                h.as_ref().map(|(_, _, _, _, url)| url.clone()),
-                h.as_ref().map(|(pid, _, _, _, _)| *pid),
-            )
-        };
-        let mut r = renderer.write();
-        r.hovered_url = hover_pos;
-        r.hovered_url_text = hover_text;
-        r.hovered_url_pane_id = hover_pane_id;
-        // Count hidden panes (fully off-screen)
-        let mut hidden_left = 0usize;
-        let mut hidden_right = 0usize;
-        for (_, vp, _, _, _, _) in &pane_data {
-            if vp.x + vp.width <= 0.0 {
-                hidden_left += 1;
-            } else if vp.x >= screen_width {
-                hidden_right += 1;
-            }
-        }
-        r.render_panes(&layer, &pane_data, &separators, &tab_titles, filter_data.as_ref(), left_inset, hidden_left, hidden_right);
-        true
-    }
-
-}
-
-/// Global counter for unique window autosave names.
-static WINDOW_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
-/// Show a confirmation alert listing running processes.
-/// Returns `true` if the user confirmed (or no processes are running).
-pub fn confirm_running_processes(mtm: MainThreadMarker, procs: &[(String, String)], message: &str, confirm_button: &str) -> bool {
-    if procs.is_empty() {
-        return true;
-    }
-    let alert = NSAlert::new(mtm);
-    alert.setAlertStyle(NSAlertStyle::Warning);
-    alert.setMessageText(&NSString::from_str(message));
-    let mut lines = String::from("The following processes are running:");
-    for (tab, name) in procs {
-        lines.push_str(&format!("\n\u{2022} Tab \u{ab}{}\u{bb}: {}", tab, name));
-    }
-    alert.setInformativeText(&NSString::from_str(&lines));
-    alert.addButtonWithTitle(&NSString::from_str(confirm_button));
-    alert.addButtonWithTitle(&NSString::from_str("Cancel"));
-    alert.runModal() == 1000 // NSAlertFirstButtonReturn
-}
-
-/// Create a new Kova window with the given tabs.
-pub fn create_window(mtm: MainThreadMarker, config: &Config, tabs: Vec<Tab>, active_tab: usize) -> Retained<NSWindow> {
-    let content_rect = CGRect {
-        origin: CGPoint { x: config.window.x, y: config.window.y },
-        size: CGSize {
-            width: config.window.width,
-            height: config.window.height,
-        },
-    };
-
-    let style = NSWindowStyleMask::Titled
-        | NSWindowStyleMask::Closable
-        | NSWindowStyleMask::Miniaturizable
-        | NSWindowStyleMask::Resizable
-        | NSWindowStyleMask::FullSizeContentView;
-
-    let window = unsafe {
-        NSWindow::initWithContentRect_styleMask_backing_defer(
-            mtm.alloc(),
-            content_rect,
-            style,
-            NSBackingStoreType::Buffered,
-            false,
-        )
-    };
-
-    let title = NSString::from_str("Kova");
-    window.setTitle(&title);
-    window.setTitlebarAppearsTransparent(true);
-    window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
-    window.setMinSize(CGSize {
-        width: 200.0,
-        height: 150.0,
-    });
-
-    // Unique autosave name per window so NSUserDefaults doesn't collide
-    let win_id = WINDOW_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let autosave = format!("KovaWindow-{}", win_id);
-    window.setFrameAutosaveName(&NSString::from_str(&autosave));
-
-    let view = KovaView::new(mtm, content_rect);
-    view.setup_metal(mtm, config, tabs, active_tab);
-    window.setContentView(Some(&view));
-    window.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*view)));
-    window.makeFirstResponder(Some(&view));
-    window.setAcceptsMouseMovedEvents(true);
-
-    window
 }

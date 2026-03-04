@@ -44,12 +44,12 @@ impl Pty {
         };
         let _ = termios::tcsetwinsize(master_fd.as_fd(), winsize);
 
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-        // Login shell: arg0 = "-" + shell name (e.g. "-zsh")
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        // Login shell: arg0 = "-" + shell name (e.g. "-bash")
         let shell_name = std::path::Path::new(&shell)
             .file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or("zsh");
+            .unwrap_or("bash");
         let arg0 = format!("-{}", shell_name);
 
         let start_dir = working_dir
@@ -81,7 +81,8 @@ impl Pty {
 
                     // Set the slave PTY as controlling terminal
                     // (stdin fd 0 is the slave after Command sets it up)
-                    if libc::ioctl(0, libc::TIOCSCTTY as libc::c_ulong, 0) == -1 {
+                    // On Linux, TIOCSCTTY takes c_ulong
+                    if libc::ioctl(0, libc::TIOCSCTTY, 0) == -1 {
                         return Err(std::io::Error::last_os_error());
                     }
 
@@ -187,35 +188,18 @@ impl Pty {
         if fg_pgid <= 0 || fg_pgid == self.child_pid as i32 {
             return None; // shell is in foreground = idle
         }
-        let mut name_buf = [0u8; 256];
-        let len = unsafe {
-            libc::proc_name(fg_pgid, name_buf.as_mut_ptr() as *mut libc::c_void, 256)
-        };
-        if len > 0 {
-            Some(String::from_utf8_lossy(&name_buf[..len as usize]).to_string())
-        } else {
-            None
-        }
+        // On Linux, read /proc/<pid>/comm for the process name
+        std::fs::read_to_string(format!("/proc/{}/comm", fg_pgid))
+            .ok()
+            .map(|s| s.trim().to_string())
     }
 
     /// Returns the current working directory of the child shell process.
-    /// Uses macOS `proc_pidinfo` with `PROC_PIDVNODEPATHINFO`.
+    /// On Linux, reads /proc/<pid>/cwd symlink.
     pub fn cwd(&self) -> Option<String> {
-        unsafe {
-            let mut vpi: libc::proc_vnodepathinfo = std::mem::zeroed();
-            let ret = libc::proc_pidinfo(
-                self.child_pid as i32,
-                libc::PROC_PIDVNODEPATHINFO,
-                0,
-                &mut vpi as *mut _ as *mut libc::c_void,
-                std::mem::size_of::<libc::proc_vnodepathinfo>() as i32,
-            );
-            if ret <= 0 {
-                return None;
-            }
-            let path = std::ffi::CStr::from_ptr(vpi.pvi_cdir.vip_path.as_ptr() as *const i8);
-            path.to_str().ok().map(String::from)
-        }
+        std::fs::read_link(format!("/proc/{}/cwd", self.child_pid))
+            .ok()
+            .map(|p| p.to_string_lossy().to_string())
     }
 }
 
