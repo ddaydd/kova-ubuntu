@@ -4,44 +4,44 @@
 
 | Shortcut | Action |
 |----------|--------|
-| Cmd+T | New tab |
-| Cmd+W | Close pane (or tab if last pane) |
-| Cmd+1..9 | Switch to tab N |
-| Cmd+Shift+[ | Previous tab |
-| Cmd+Shift+] | Next tab |
-| Cmd+Shift+R | Rename tab |
+| Super+T | New tab |
+| Super+W | Close pane (or tab if last pane) |
+| Super+1..9 | Switch to tab N |
+| Super+Shift+[ | Previous tab |
+| Super+Shift+] | Next tab |
+| Super+Shift+R | Rename tab |
 
 ## Splits
 
 | Shortcut | Action |
 |----------|--------|
-| Cmd+D | Vertical split (side by side, within focused pane) |
-| Cmd+Shift+D | Horizontal split (stacked, within focused pane) |
-| Cmd+E | Vertical split at root (full-height column) |
-| Cmd+Shift+E | Horizontal split at root (full-width row) |
-| Cmd+Option+Arrows | Navigate between panes (cross-tab if at edge) |
-| Cmd+Shift+Arrows | Swap focused pane with neighbor |
-| Cmd+Ctrl+Arrows | Resize splits |
+| Super+D | Vertical split (side by side, within focused pane) |
+| Super+Shift+D | Horizontal split (stacked, within focused pane) |
+| Super+E | Vertical split at root (full-height column) |
+| Super+Shift+E | Horizontal split at root (full-width row) |
+| Super+Alt+Arrows | Navigate between panes (cross-tab if at edge) |
+| Super+Shift+Arrows | Swap focused pane with neighbor |
+| Super+Ctrl+Arrows | Resize splits |
 
 ## Windows
 
 | Shortcut | Action |
 |----------|--------|
-| Cmd+N | New window |
-| Cmd+Shift+T | Detach tab to new window |
-| Cmd+Shift+M | Merge all tabs into another window |
+| Super+N | New window |
+| Super+Shift+T | Detach tab to new window |
+| Super+Shift+M | Merge all tabs into another window |
 
 ## Editing
 
 | Shortcut | Action |
 |----------|--------|
-| Cmd+C | Copy selection |
-| Cmd+V | Paste (text or image as file path) |
-| Cmd+Backspace | Kill line (Ctrl+U) |
-| Cmd+Left | Beginning of line (Home) |
-| Cmd+Right | End of line (End) |
-| Option+Left | Word back |
-| Option+Right | Word forward |
+| Super+C | Copy selection |
+| Super+V | Paste |
+| Super+Backspace | Kill line (Ctrl+U) |
+| Super+Left | Beginning of line (Home) |
+| Super+Right | End of line (End) |
+| Alt+Left | Word back |
+| Alt+Right | Word forward |
 | Shift+Enter | Newline without executing |
 | Shift+Tab | Backtab (CSI Z) |
 
@@ -49,9 +49,9 @@
 
 | Shortcut | Action |
 |----------|--------|
-| Cmd+F | Toggle search filter |
-| Cmd+K | Clear scrollback and screen |
-| Cmd+Q | Quit |
+| Super+F | Toggle search filter |
+| Super+K | Clear scrollback and screen |
+| Super+Q | Quit |
 | Ctrl+A..Z | Send control character |
 
 ## Mouse
@@ -59,8 +59,8 @@
 | Action | Effect |
 |--------|--------|
 | Click + drag | Text selection |
-| Cmd+hover | Highlight URL (underline + cursor change) |
-| Cmd+click | Open URL in browser |
+| Super+hover | Highlight URL (underline + cursor change) |
+| Super+click | Open URL in browser |
 | Drag separator | Resize splits |
 | Drag tab | Reorder tabs |
 | Trackpad horizontal scroll | Scroll virtual viewport when splits overflow |
