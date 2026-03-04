@@ -40,6 +40,9 @@ pub struct KovaWindow {
     rename_tab: Option<RenameTabState>,
     modifiers: winit::event::Modifiers,
     closing: bool,
+    /// Current mouse position in physical pixels.
+    mouse_x: f64,
+    mouse_y: f64,
     /// Git branch poll counter (ticks since last poll).
     git_poll_counter: u32,
     git_poll_interval: u32,
@@ -129,6 +132,8 @@ impl KovaWindow {
             rename_tab: None,
             modifiers: Default::default(),
             closing: false,
+            mouse_x: 0.0,
+            mouse_y: 0.0,
             git_poll_counter: 0,
             git_poll_interval: fps * 2,
         };
@@ -472,13 +477,35 @@ impl KovaWindow {
                 }
             }
 
+            WindowEvent::CursorMoved { position, .. } => {
+                self.mouse_x = position.x;
+                self.mouse_y = position.y;
+            }
+
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
             } => {
-                // Click to focus pane (hit-test splits)
-                // TODO: implement mouse selection, tab bar clicks, separator drag
+                let scale = self.window.scale_factor();
+                let x = self.mouse_x / scale;
+                let y = self.mouse_y / scale;
+                let (_, cell_h) = self.renderer.cell_size();
+                let bar_h = (cell_h * 2.0) as f64;
+
+                if y < bar_h && !self.tabs.is_empty() {
+                    // Click in tab bar — switch tab
+                    let cell_w = self.renderer.cell_size().0 as f64;
+                    let viewport_w = self.surface_config.width as f64 / scale;
+                    let max_tab_w = cell_w * 20.0;
+                    let tab_width = (viewport_w / self.tabs.len() as f64).min(max_tab_w);
+                    let clicked_tab = (x / tab_width) as usize;
+                    if clicked_tab < self.tabs.len() {
+                        self.active_tab = clicked_tab;
+                        self.resize_all_panes();
+                    }
+                }
+                // TODO: implement mouse selection, separator drag
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
