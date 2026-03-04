@@ -38,6 +38,7 @@ pub struct KovaWindow {
     last_scale: f64,
     filter: Option<FilterState>,
     rename_tab: Option<RenameTabState>,
+    show_help: bool,
     modifiers: winit::event::Modifiers,
     closing: bool,
     /// Current mouse position in physical pixels.
@@ -46,6 +47,8 @@ pub struct KovaWindow {
     /// Git branch poll counter (ticks since last poll).
     git_poll_counter: u32,
     git_poll_interval: u32,
+    /// Frames remaining to show the "F1 for help" hint at startup.
+    help_hint_frames: u32,
 }
 
 impl KovaWindow {
@@ -130,12 +133,14 @@ impl KovaWindow {
             last_scale: scale,
             filter: None,
             rename_tab: None,
+            show_help: false,
             modifiers: Default::default(),
             closing: false,
             mouse_x: 0.0,
             mouse_y: 0.0,
             git_poll_counter: 0,
             git_poll_interval: fps * 2,
+            help_hint_frames: fps * 3,
         };
 
         // Initial resize
@@ -205,6 +210,11 @@ impl KovaWindow {
         // Check bells
         for tab in &mut self.tabs {
             tab.check_bell();
+        }
+
+        // Help hint countdown
+        if self.help_hint_frames > 0 {
+            self.help_hint_frames -= 1;
         }
 
         // Render
@@ -290,6 +300,8 @@ impl KovaWindow {
             &separators,
             &tab_titles,
             filter_data.as_ref(),
+            self.show_help,
+            self.help_hint_frames,
             0.0, // no traffic light inset on Linux
             0,
             0,
@@ -326,6 +338,20 @@ impl KovaWindow {
 
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
+                    return WindowAction::None;
+                }
+
+                // Dismiss startup hint on any keypress
+                self.help_hint_frames = 0;
+
+                // Handle help overlay mode
+                if self.show_help {
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Escape) | Key::Named(NamedKey::F1) => {
+                            self.show_help = false;
+                        }
+                        _ => {}
+                    }
                     return WindowAction::None;
                 }
 
@@ -416,6 +442,7 @@ impl KovaWindow {
                             }
                         }
                         Action::ToggleFilter => self.toggle_filter(),
+                        Action::ToggleHelp => self.show_help = !self.show_help,
                         Action::ClearScrollback => {
                             if let Some(pane) = self.focused_pane() {
                                 pane.terminal.write().clear_scrollback_and_screen();

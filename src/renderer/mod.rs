@@ -328,6 +328,8 @@ impl Renderer {
         separators: &[(f32, f32, f32, f32)],
         tab_titles: &[(String, bool, Option<usize>, bool, bool)],
         filter: Option<&FilterRenderData>,
+        show_help: bool,
+        help_hint_frames: u32,
         tab_bar_left_inset: f32,
         hidden_left: usize,
         hidden_right: usize,
@@ -394,7 +396,7 @@ impl Renderer {
         }
         let all_ready = !any_not_ready;
         let has_filter = filter.is_some();
-        if all_ready && !any_dirty && !any_sync_deferred && !blink_changed && !minute_changed && !has_filter {
+        if all_ready && !any_dirty && !any_sync_deferred && !blink_changed && !minute_changed && !has_filter && !show_help && help_hint_frames == 0 {
             return;
         }
 
@@ -475,6 +477,16 @@ impl Renderer {
             if let Some((_, vp, _, _, _, _)) = panes.iter().find(|(_, _, _, focused, _, _)| *focused) {
                 self.build_filter_overlay_vertices(&mut all_vertices, vp, filter_data);
             }
+        }
+
+        // Help overlay
+        if show_help {
+            self.build_help_overlay_vertices(&mut all_vertices, viewport_w, viewport_h);
+        }
+
+        // Startup help hint
+        if help_hint_frames > 0 && !show_help {
+            self.build_help_hint_vertices(&mut all_vertices, viewport_w, viewport_h, help_hint_frames);
         }
 
         // Update uniforms
@@ -987,6 +999,124 @@ impl Renderer {
                 }
             }
         }
+    }
+
+    fn build_help_overlay_vertices(&mut self, vertices: &mut Vec<Vertex>, viewport_w: f32, viewport_h: f32) {
+        let cell_w = self.atlas.cell_width;
+        let cell_h = self.atlas.cell_height;
+
+        // Full-screen semi-transparent background
+        let overlay_bg = [0.0, 0.0, 0.0, 0.85];
+        let no_tex = [0.0_f32, 0.0];
+        let white = [1.0_f32, 1.0, 1.0, 0.0];
+        vertices.push(Vertex { position: [0.0, 0.0], tex_coords: no_tex, color: white, bg_color: overlay_bg });
+        vertices.push(Vertex { position: [viewport_w, 0.0], tex_coords: no_tex, color: white, bg_color: overlay_bg });
+        vertices.push(Vertex { position: [0.0, viewport_h], tex_coords: no_tex, color: white, bg_color: overlay_bg });
+        vertices.push(Vertex { position: [viewport_w, 0.0], tex_coords: no_tex, color: white, bg_color: overlay_bg });
+        vertices.push(Vertex { position: [viewport_w, viewport_h], tex_coords: no_tex, color: white, bg_color: overlay_bg });
+        vertices.push(Vertex { position: [0.0, viewport_h], tex_coords: no_tex, color: white, bg_color: overlay_bg });
+
+        let no_bg = [0.0, 0.0, 0.0, 0.0];
+        let title_fg = [1.0, 0.8, 0.2, 1.0];
+        let hint_fg = [0.5, 0.5, 0.5, 1.0];
+        let key_fg = [0.9, 0.75, 0.3, 1.0];
+        let desc_fg = [0.85, 0.85, 0.85, 1.0];
+
+        let padding = PANE_H_PADDING;
+        let max_x = viewport_w - padding;
+
+        // Center the overlay content
+        let shortcuts: &[(&str, &str)] = &[
+            ("Super+T",            "New tab"),
+            ("Super+W",            "Close pane/tab"),
+            ("Super+D",            "Split vertical"),
+            ("Super+Shift+D",      "Split horizontal"),
+            ("Super+Shift+[",      "Previous tab"),
+            ("Super+Shift+]",      "Next tab"),
+            ("Super+1-9",          "Switch to tab"),
+            ("Super+Alt+Arrows",   "Navigate panes"),
+            ("Super+Shift+Arrows", "Swap panes"),
+            ("Super+Ctrl+Arrows",  "Resize panes"),
+            ("Super+F",            "Search"),
+            ("Super+C / Super+V",  "Copy / Paste"),
+            ("Super+K",            "Clear scrollback"),
+            ("Super+N",            "New window"),
+            ("Super+Q",            "Close window"),
+            ("F1",                 "Toggle this help"),
+        ];
+
+        let content_h = (shortcuts.len() as f32 + 3.0) * cell_h; // title + blank + shortcuts + blank
+        let start_y = ((viewport_h - content_h) / 2.0).max(cell_h);
+        let col_key_w = 20.0 * cell_w; // width for key column
+        let total_w = col_key_w + 20.0 * cell_w;
+        let start_x = ((viewport_w - total_w) / 2.0).max(padding);
+
+        // Title bar background
+        Self::push_bg_quad(vertices, 0.0, start_y, viewport_w, cell_h, [0.15, 0.15, 0.2]);
+
+        // Title
+        self.render_status_text(vertices, "Keyboard Shortcuts", start_x, start_y, max_x, title_fg, no_bg);
+
+        // Escape hint on the right
+        let hint = "Escape to close";
+        let hint_w = hint.len() as f32 * cell_w;
+        self.render_status_text(vertices, hint, viewport_w - hint_w - padding, start_y, max_x, hint_fg, no_bg);
+
+        // Shortcuts list
+        let list_y = start_y + cell_h * 2.0;
+        for (i, (key, desc)) in shortcuts.iter().enumerate() {
+            let y = list_y + i as f32 * cell_h;
+            self.render_status_text(vertices, key, start_x, y, start_x + col_key_w, key_fg, no_bg);
+            self.render_status_text(vertices, desc, start_x + col_key_w, y, max_x, desc_fg, no_bg);
+        }
+    }
+
+    fn build_help_hint_vertices(&mut self, vertices: &mut Vec<Vertex>, viewport_w: f32, viewport_h: f32, frames_left: u32) {
+        let cell_w = self.atlas.cell_width;
+        let cell_h = self.atlas.cell_height;
+
+        let title = "Welcome to Kova";
+        let subtitle = "F1 for help";
+        let wider = title.len().max(subtitle.len()) as f32;
+        let pad_x = cell_w * 2.0;
+        let pill_w = wider * cell_w + pad_x * 2.0;
+        let pill_h = cell_h * 2.0 + 12.0;
+        let pill_x = (viewport_w - pill_w) / 2.0;
+        let pill_y = (viewport_h - pill_h) / 2.0;
+
+        // Fade out during the last 30 frames
+        let alpha = if frames_left < 30 {
+            frames_left as f32 / 30.0 * 0.7
+        } else {
+            0.7
+        };
+
+        let pill_bg = [0.1, 0.1, 0.12, alpha];
+        let no_tex = [0.0_f32, 0.0];
+        let white = [1.0_f32, 1.0, 1.0, 0.0];
+        vertices.push(Vertex { position: [pill_x, pill_y], tex_coords: no_tex, color: white, bg_color: pill_bg });
+        vertices.push(Vertex { position: [pill_x + pill_w, pill_y], tex_coords: no_tex, color: white, bg_color: pill_bg });
+        vertices.push(Vertex { position: [pill_x, pill_y + pill_h], tex_coords: no_tex, color: white, bg_color: pill_bg });
+        vertices.push(Vertex { position: [pill_x + pill_w, pill_y], tex_coords: no_tex, color: white, bg_color: pill_bg });
+        vertices.push(Vertex { position: [pill_x + pill_w, pill_y + pill_h], tex_coords: no_tex, color: white, bg_color: pill_bg });
+        vertices.push(Vertex { position: [pill_x, pill_y + pill_h], tex_coords: no_tex, color: white, bg_color: pill_bg });
+
+        let text_alpha = if frames_left < 30 { frames_left as f32 / 30.0 } else { 1.0 };
+        let no_bg = [0.0, 0.0, 0.0, 0.0];
+
+        // Title centered
+        let title_w = title.len() as f32 * cell_w;
+        let title_x = pill_x + (pill_w - title_w) / 2.0;
+        let title_y = pill_y + 4.0;
+        let title_fg = [1.0, 0.8, 0.2, text_alpha];
+        self.render_status_text(vertices, title, title_x, title_y, viewport_w, title_fg, no_bg);
+
+        // Subtitle centered
+        let sub_w = subtitle.len() as f32 * cell_w;
+        let sub_x = pill_x + (pill_w - sub_w) / 2.0;
+        let sub_y = title_y + cell_h + 4.0;
+        let sub_fg = [0.6, 0.6, 0.6, text_alpha];
+        self.render_status_text(vertices, subtitle, sub_x, sub_y, viewport_w, sub_fg, no_bg);
     }
 
     fn build_loading_vertices(&mut self, vp: &PaneViewport) -> Vec<Vertex> {

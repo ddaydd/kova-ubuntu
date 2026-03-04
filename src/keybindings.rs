@@ -23,6 +23,7 @@ pub enum KeyType {
     Right,
     Backspace,
     Enter,
+    F1,
 }
 
 /// Window/tab/split actions dispatched from key events.
@@ -51,6 +52,7 @@ pub enum Action {
     Navigate(NavDirection),
     SwapPane(NavDirection),
     Resize(SplitAxis, f32),
+    ToggleHelp,
 }
 
 /// Terminal-level actions dispatched from handle_key_event.
@@ -84,6 +86,7 @@ impl KeyCombo {
             Key::Named(NamedKey::ArrowRight) => KeyType::Right,
             Key::Named(NamedKey::Backspace) => KeyType::Backspace,
             Key::Named(NamedKey::Enter) => KeyType::Enter,
+            Key::Named(NamedKey::F1) => KeyType::F1,
             Key::Character(s) => {
                 let c = s.chars().next().unwrap_or('\0').to_ascii_lowercase();
                 KeyType::Char(c)
@@ -135,6 +138,7 @@ fn parse_key_combo(s: &str) -> KeyCombo {
                 "right" => KeyType::Right,
                 "backspace" | "delete" => KeyType::Backspace,
                 "enter" | "return" => KeyType::Enter,
+                "f1" => KeyType::F1,
                 "[" => KeyType::Char('['),
                 "]" => KeyType::Char(']'),
                 s if s.len() == 1 => KeyType::Char(s.chars().next().unwrap()),
@@ -180,6 +184,7 @@ impl Keybindings {
         bind(&keys.rename_pane, Action::RenamePane);
         bind(&keys.detach_tab, Action::DetachTab);
         bind(&keys.merge_window, Action::MergeWindow);
+        bind(&keys.toggle_help, Action::ToggleHelp);
 
         for (i, s) in [
             &keys.switch_tab_1, &keys.switch_tab_2, &keys.switch_tab_3,
