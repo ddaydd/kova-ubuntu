@@ -88,6 +88,7 @@ pub fn handle_key_event(
                     return;
                 }
                 NamedKey::Escape => { pty.write(b"\x1b"); return; }
+                NamedKey::Space => { pty.write(b" "); return; }
                 NamedKey::F1 => { pty.write(b"\x1bOP"); return; }
                 NamedKey::F2 => { pty.write(b"\x1bOQ"); return; }
                 NamedKey::F3 => { pty.write(b"\x1bOR"); return; }
