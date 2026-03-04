@@ -1,22 +1,24 @@
-# Kova
+# Kova (Linux)
 
-A blazing-fast macOS terminal built from scratch with Rust and Metal. No Electron, no cross-platform compromises — just native GPU rendering on Mac.
+> Fork Linux de [Kova](https://github.com/ddaydd/kova), originalement un terminal macOS (Metal + AppKit + CoreText), porté vers **winit + wgpu + FreeType + fontconfig**.
+
+A blazing-fast terminal built from scratch with Rust and GPU rendering. No Electron, no cross-platform compromises — just native GPU rendering on Linux.
 
 ## Features
 
-### GPU-rendered with Metal
+### GPU-rendered with wgpu
 
-Every frame is drawn on the GPU via Apple's Metal API. Glyph atlas with on-demand rasterization via CoreText. Dirty-flag rendering — the GPU only redraws when terminal state actually changes. Synchronized output (mode 2026) eliminates tearing during fast updates.
+Every frame is drawn on the GPU via wgpu (Vulkan/OpenGL). Glyph atlas with on-demand rasterization via FreeType. Dirty-flag rendering — the GPU only redraws when terminal state actually changes. Synchronized output (mode 2026) eliminates tearing during fast updates.
 
 ### Splits and tabs
 
 - Binary tree splits — horizontal and vertical, nested arbitrarily
-- Drag-to-resize separators or use keyboard shortcuts (Cmd+Ctrl+Arrows)
+- Drag-to-resize separators or use keyboard shortcuts (Super+Ctrl+Arrows)
 - Auto-equalize: splits rebalance to equal sizes when adding/removing panes
-- Horizontal scroll — when splits exceed the screen width, trackpad horizontal scroll navigates the virtual viewport. Configurable minimum split width.
-- Tabs with colored tab bar, drag-to-reorder, and rename (Cmd+Shift+R)
-- Cross-tab split navigation (Cmd+Option+Arrows)
-- Swap panes between splits (Cmd+Shift+Arrows)
+- Horizontal scroll — when splits exceed the screen width, horizontal scroll navigates the virtual viewport. Configurable minimum split width.
+- Tabs with colored tab bar, drag-to-reorder, and rename (Super+Shift+R)
+- Cross-tab split navigation (Super+Alt+Arrows)
+- Swap panes between splits (Super+Shift+Arrows)
 - New splits and tabs inherit the CWD of the focused pane
 
 ### Session persistence
@@ -25,11 +27,11 @@ Layout (tabs, splits, CWD) is saved on quit and restored on launch. Window posit
 
 ### Clickable URLs
 
-Cmd+hover highlights URLs with an underline and pointer cursor. Cmd+click opens them in your browser. The hovered URL is shown in the status bar.
+Super+hover highlights URLs with an underline and pointer cursor. Super+click opens them in your browser. The hovered URL is shown in the status bar.
 
 ### Scrollback search
 
-Cmd+F opens an inline search overlay with match highlighting. Click a match to jump to it.
+Super+F opens an inline search overlay with match highlighting. Click a match to jump to it.
 
 ### Status bar
 
@@ -39,13 +41,13 @@ Displays CWD, git branch (auto-polling every ~2s), scroll position indicator, an
 
 Full support for emoji and CJK characters with proper 2-column rendering.
 
-### macOS-native input
+### Input shortcuts
 
 | Shortcut | Action |
 |---|---|
-| Option+Left/Right | Word jump |
-| Cmd+Left/Right | Beginning/end of line |
-| Cmd+Backspace | Kill line |
+| Alt+Left/Right | Word jump |
+| Super+Left/Right | Beginning/end of line |
+| Super+Backspace | Kill line |
 | Shift+Enter | Newline without executing |
 
 ### Configuration
@@ -80,46 +82,62 @@ min_width = 300.0  # minimum pane width in points before horizontal scroll activ
 
 | Shortcut | Action |
 |---|---|
-| Cmd+T | New tab |
-| Cmd+W | Close pane/tab |
-| Cmd+D | Vertical split (side by side) |
-| Cmd+Shift+D | Horizontal split (stacked) |
-| Cmd+E | Vertical split at root (full-height column) |
-| Cmd+Shift+E | Horizontal split at root (full-width row) |
-| Cmd+Shift+[ / ] | Previous/next tab |
-| Cmd+1..9 | Jump to tab |
-| Cmd+Option+Arrows | Navigate between splits (cross-tab) |
-| Cmd+Shift+Arrows | Swap pane with neighbor |
-| Cmd+Ctrl+Arrows | Resize split |
-| Cmd+Shift+R | Rename tab |
-| Cmd+F | Search scrollback |
-| Cmd+K | Clear scrollback and screen |
-| Cmd+C | Copy selection |
-| Cmd+V | Paste |
+| Super+T | New tab |
+| Super+W | Close pane/tab |
+| Super+D | Vertical split (side by side) |
+| Super+Shift+D | Horizontal split (stacked) |
+| Super+E | Vertical split at root (full-height column) |
+| Super+Shift+E | Horizontal split at root (full-width row) |
+| Super+Shift+[ / ] | Previous/next tab |
+| Super+1..9 | Jump to tab |
+| Super+Alt+Arrows | Navigate between splits (cross-tab) |
+| Super+Shift+Arrows | Swap pane with neighbor |
+| Super+Ctrl+Arrows | Resize split |
+| Super+Shift+R | Rename tab |
+| Super+F | Search scrollback |
+| Super+K | Clear scrollback and screen |
+| Super+C | Copy selection |
+| Super+V | Paste |
+
+## Prerequisites
+
+```bash
+# Ubuntu / Debian
+sudo apt install build-essential pkg-config libfreetype-dev libfontconfig1-dev libxkbcommon-dev
+```
 
 ## Build
 
-Requires macOS with Metal support and Rust (edition 2024).
+Requires Linux with Vulkan or OpenGL support and Rust (edition 2024).
 
 ```bash
 cargo build --release
 ```
 
-The binary lands in `~/.cargo/target/release/kova` (global target dir).
+The binary lands in `target/release/kova`.
 
-### Install as .app
+### Install
 
 ```bash
-mkdir -p /Applications/Kova.app/Contents/MacOS
-cp Info.plist /Applications/Kova.app/Contents/
-ln -sf ~/.cargo/target/release/kova /Applications/Kova.app/Contents/MacOS/kova
+cargo build --release
+sudo cp target/release/kova /usr/local/bin/
 ```
 
-After the initial setup, `cargo build --release` is all you need — the symlink picks up the new binary.
+### Run
+
+```bash
+cargo run --release
+
+# With debug logs
+RUST_LOG=info cargo run --release
+```
+
+## Logs
+
+`~/.local/share/kova/kova.log` (level DEBUG par défaut, configurable via `RUST_LOG`).
 
 ## Non-goals
 
-- Cross-platform support
 - Plugin system
 - Network multiplexing (ssh tunneling, etc.)
 - Built-in AI (Claude runs *in* the terminal, not *as* the terminal)
