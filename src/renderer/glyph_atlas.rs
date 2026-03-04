@@ -68,11 +68,11 @@ impl GlyphAtlas {
             .new_face(&font_path, 0)
             .expect("failed to load font face");
 
-        // Set pixel size
-        let pixel_size = font_size.round() as u32;
+        // Set char size in 26.6 fixed point (font_size * 64), at 96 DPI
+        let char_size = (font_size * 64.0).round() as isize;
         ft_face
-            .set_pixel_sizes(0, pixel_size)
-            .expect("failed to set pixel size");
+            .set_char_size(char_size, char_size, 96, 96)
+            .expect("failed to set char size");
 
         // Get metrics
         let metrics = ft_face.size_metrics().expect("no size metrics");
@@ -117,7 +117,7 @@ impl GlyphAtlas {
             let atlas_x = col * glyph_cell_w;
             let atlas_y = row * glyph_cell_h;
 
-            if ft_face.load_char(c as usize, LoadFlag::RENDER).is_err() {
+            if ft_face.load_char(c as usize, LoadFlag::RENDER | LoadFlag::FORCE_AUTOHINT | LoadFlag::TARGET_LIGHT).is_err() {
                 glyphs.insert(
                     c,
                     GlyphInfo {
@@ -244,8 +244,8 @@ impl GlyphAtlas {
         for name in &fallback_names {
             if let Some(font) = fc.find(name, None) {
                 if let Ok(face) = self.ft_lib.new_face(&font.path, 0) {
-                    let pixel_size = self.font_size.round() as u32;
-                    let _ = face.set_pixel_sizes(0, pixel_size);
+                    let char_size = (self.font_size * 64.0).round() as isize;
+                    let _ = face.set_char_size(char_size, char_size, 96, 96);
                     let glyph_idx = face.get_char_index(c as usize);
                     if glyph_idx.is_some() {
                         log::trace!("Fallback for '{}' U+{:04X}: {} ({:?})", c, c as u32, name, font.path);
@@ -405,8 +405,8 @@ impl GlyphAtlas {
                 == freetype::bitmap::PixelMode::Bgra;
 
         if !is_color {
-            // Reload without COLOR flag for grayscale
-            if face.load_char(c as usize, LoadFlag::RENDER).is_err() {
+            // Reload without COLOR flag for grayscale with light hinting
+            if face.load_char(c as usize, LoadFlag::RENDER | LoadFlag::FORCE_AUTOHINT | LoadFlag::TARGET_LIGHT).is_err() {
                 return None;
             }
         }
@@ -505,7 +505,7 @@ impl GlyphAtlas {
                 == freetype::bitmap::PixelMode::Bgra;
 
         if !is_color {
-            if face.load_char(first_char as usize, LoadFlag::RENDER).is_err() {
+            if face.load_char(first_char as usize, LoadFlag::RENDER | LoadFlag::FORCE_AUTOHINT | LoadFlag::TARGET_LIGHT).is_err() {
                 return None;
             }
         }
