@@ -95,6 +95,7 @@ impl Renderer {
         scale: f64,
         config: &Config,
     ) -> Self {
+        log::info!("Renderer::new: font_size={}, scale={}, effective_px={}", config.font.size, scale, config.font.size * scale);
         let atlas = GlyphAtlas::new(config.font.size * scale, &config.font.family);
 
         // Create atlas texture

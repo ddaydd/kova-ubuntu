@@ -49,17 +49,29 @@ impl GlyphAtlas {
         let fc = fontconfig::Fontconfig::new().expect("failed to init fontconfig");
         let fc_ref: *const fontconfig::Fontconfig = &fc;
 
-        // Find font file via fontconfig
-        let font_path = unsafe { &*fc_ref }
-            .find(font_name, None)
-            .map(|f| f.path.clone())
-            .unwrap_or_else(|| {
-                log::warn!("Font '{}' not found, trying monospace fallback", font_name);
+        // Find font file via fontconfig.
+        // fontconfig always returns a "best match" even if the font isn't installed,
+        // so we verify the result name contains our request (case-insensitive).
+        // If not, fall back to "monospace" which fontconfig maps to an actual mono font.
+        let font_path = {
+            let name_lower = font_name.to_ascii_lowercase();
+            let direct = unsafe { &*fc_ref }.find(font_name, None);
+            let matched = direct.as_ref().and_then(|f| {
+                let result_name = f.name.to_ascii_lowercase();
+                if result_name.contains(&name_lower) || name_lower.contains(&result_name) {
+                    Some(f.path.clone())
+                } else {
+                    None
+                }
+            });
+            matched.unwrap_or_else(|| {
+                log::warn!("Font '{}' not found, falling back to monospace", font_name);
                 unsafe { &*fc_ref }
                     .find("monospace", None)
                     .map(|f| f.path.clone())
                     .unwrap_or_else(|| std::path::PathBuf::from("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"))
-            });
+            })
+        };
 
         log::info!("Using font: {} -> {:?}", font_name, font_path);
 
@@ -68,11 +80,11 @@ impl GlyphAtlas {
             .new_face(&font_path, 0)
             .expect("failed to load font face");
 
-        // Set char size in 26.6 fixed point (font_size * 64), at 96 DPI
-        let char_size = (font_size * 64.0).round() as isize;
+        // Set pixel size directly (simpler, DPI-independent)
+        let pixel_size = font_size.round() as u32;
         ft_face
-            .set_char_size(char_size, char_size, 96, 96)
-            .expect("failed to set char size");
+            .set_pixel_sizes(0, pixel_size)
+            .expect("failed to set pixel size");
 
         // Get metrics
         let metrics = ft_face.size_metrics().expect("no size metrics");
@@ -244,8 +256,8 @@ impl GlyphAtlas {
         for name in &fallback_names {
             if let Some(font) = fc.find(name, None) {
                 if let Ok(face) = self.ft_lib.new_face(&font.path, 0) {
-                    let char_size = (self.font_size * 64.0).round() as isize;
-                    let _ = face.set_char_size(char_size, char_size, 96, 96);
+                    let pixel_size = self.font_size.round() as u32;
+                    let _ = face.set_pixel_sizes(0, pixel_size);
                     let glyph_idx = face.get_char_index(c as usize);
                     if glyph_idx.is_some() {
                         log::trace!("Fallback for '{}' U+{:04X}: {} ({:?})", c, c as u32, name, font.path);

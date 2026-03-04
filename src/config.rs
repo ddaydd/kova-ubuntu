@@ -143,7 +143,7 @@ impl Default for Config {
 impl Default for FontConfig {
     fn default() -> Self {
         FontConfig {
-            family: "Hack".to_string(),
+            family: "monospace".to_string(),
             size: 13.0,
         }
     }
