@@ -51,8 +51,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         return tex_color;
     }
 
-    // Grayscale glyph: use luminance as alpha mask
-    let alpha = max(max(tex_color.r, tex_color.g), tex_color.b);
+    // LCD subpixel rendering: R,G,B channels are per-subpixel coverage masks.
+    // Blend each color channel independently for sharper text.
+    let r = in.color.r * tex_color.r;
+    let g = in.color.g * tex_color.g;
+    let b = in.color.b * tex_color.b;
+    let a = tex_color.a;
 
-    return vec4<f32>(in.color.rgb, in.color.a * alpha);
+    return vec4<f32>(r, g, b, a);
 }

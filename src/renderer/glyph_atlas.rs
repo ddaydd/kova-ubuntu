@@ -1,5 +1,5 @@
 use freetype::face::LoadFlag;
-use freetype::Library as FtLibrary;
+use freetype::{LcdFilter, Library as FtLibrary};
 use std::collections::HashMap;
 use unicode_width::UnicodeWidthChar;
 
@@ -76,6 +76,7 @@ impl GlyphAtlas {
         log::info!("Using font: {} -> {:?}", font_name, font_path);
 
         let ft_lib = FtLibrary::init().expect("failed to init FreeType");
+        let _ = ft_lib.set_lcd_filter(LcdFilter::LcdFilterDefault);
         let ft_face = ft_lib
             .new_face(&font_path, 0)
             .expect("failed to load font face");
@@ -129,7 +130,7 @@ impl GlyphAtlas {
             let atlas_x = col * glyph_cell_w;
             let atlas_y = row * glyph_cell_h;
 
-            if ft_face.load_char(c as usize, LoadFlag::RENDER | LoadFlag::FORCE_AUTOHINT | LoadFlag::TARGET_LIGHT).is_err() {
+            if ft_face.load_char(c as usize, LoadFlag::RENDER | LoadFlag::TARGET_LCD).is_err() {
                 glyphs.insert(
                     c,
                     GlyphInfo {
@@ -145,36 +146,47 @@ impl GlyphAtlas {
 
             let glyph_slot = ft_face.glyph();
             let bitmap = glyph_slot.bitmap();
-            let bitmap_left = glyph_slot.bitmap_left() as usize;
+            let bitmap_left = glyph_slot.bitmap_left().max(0) as usize;
             let bitmap_top = glyph_slot.bitmap_top();
 
             // baseline_y = ascent (from top of cell to baseline)
             let baseline_y = ascent.round() as i32;
             let y_off = (baseline_y - bitmap_top).max(0) as usize;
 
-            let bm_w = bitmap.width() as usize;
+            // LCD bitmap: width in bytes is 3x pixel width (R,G,B per pixel)
+            let bm_w_bytes = bitmap.width() as usize;
+            if bm_w_bytes == 0 {
+                // Space or empty glyph — just record position
+                glyphs.insert(c, GlyphInfo { x: atlas_x, y: atlas_y, width: glyph_cell_w, height: glyph_cell_h, is_color: false });
+                continue;
+            }
+            let bm_w = (bm_w_bytes + 2) / 3; // round up to avoid dropping narrow glyphs
             let bm_h = bitmap.rows() as usize;
             let bm_pitch = bitmap.pitch().unsigned_abs() as usize;
             let bm_buf = bitmap.buffer();
 
-            // Copy grayscale bitmap to atlas RGBA
+            // Copy LCD subpixel bitmap to atlas RGBA
+            let cell_y_end = atlas_y as usize + glyph_cell_h as usize;
             for py in 0..bm_h {
                 let dst_y = atlas_y as usize + y_off + py;
-                if dst_y >= atlas_height as usize || py >= bmp_h {
+                if dst_y >= cell_y_end || dst_y >= atlas_height as usize {
                     break;
                 }
                 for px in 0..bm_w {
                     let dst_x = atlas_x as usize + bitmap_left + px;
-                    if dst_x >= atlas_width as usize || bitmap_left + px >= bmp_w {
+                    if dst_x >= (atlas_x as usize + glyph_cell_w as usize) || dst_x >= atlas_width as usize {
                         break;
                     }
-                    let alpha = bm_buf[py * bm_pitch + px];
-                    if alpha > 0 {
+                    let base = py * bm_pitch + px * 3;
+                    let r = if base < bm_buf.len() { bm_buf[base] } else { 0 };
+                    let g = if base + 1 < bm_buf.len() { bm_buf[base + 1] } else { 0 };
+                    let b = if base + 2 < bm_buf.len() { bm_buf[base + 2] } else { 0 };
+                    if r > 0 || g > 0 || b > 0 {
                         let off = dst_y * atlas_bpr + dst_x * 4;
-                        atlas_buf[off] = 255;
-                        atlas_buf[off + 1] = 255;
-                        atlas_buf[off + 2] = 255;
-                        atlas_buf[off + 3] = alpha;
+                        atlas_buf[off] = r;
+                        atlas_buf[off + 1] = g;
+                        atlas_buf[off + 2] = b;
+                        atlas_buf[off + 3] = r.max(g).max(b);
                     }
                 }
             }
@@ -417,8 +429,8 @@ impl GlyphAtlas {
                 == freetype::bitmap::PixelMode::Bgra;
 
         if !is_color {
-            // Reload without COLOR flag for grayscale with light hinting
-            if face.load_char(c as usize, LoadFlag::RENDER | LoadFlag::FORCE_AUTOHINT | LoadFlag::TARGET_LIGHT).is_err() {
+            // Reload with LCD subpixel rendering
+            if face.load_char(c as usize, LoadFlag::RENDER | LoadFlag::TARGET_LCD).is_err() {
                 return None;
             }
         }
@@ -432,7 +444,6 @@ impl GlyphAtlas {
         let ascent = (metrics.ascender as f64 / 64.0).round() as i32;
         let y_off = (ascent - bitmap_top).max(0) as usize;
 
-        let bm_w = bitmap.width() as usize;
         let bm_h = bitmap.rows() as usize;
         let bm_pitch = bitmap.pitch().unsigned_abs() as usize;
         let bm_buf = bitmap.buffer();
@@ -441,6 +452,7 @@ impl GlyphAtlas {
 
         if is_color {
             // BGRA bitmap from FreeType
+            let bm_w = bitmap.width() as usize;
             for py in 0..bm_h {
                 let dst_y = y_off + py;
                 if dst_y >= bmp_h { break; }
@@ -459,20 +471,25 @@ impl GlyphAtlas {
                 }
             }
         } else {
-            // Grayscale bitmap
+            // LCD subpixel bitmap
+            let bm_w_bytes = bitmap.width() as usize;
+            let bm_w = (bm_w_bytes + 2) / 3;
             for py in 0..bm_h {
                 let dst_y = y_off + py;
                 if dst_y >= bmp_h { break; }
                 for px in 0..bm_w {
                     let dst_x = bitmap_left + px;
                     if dst_x >= bmp_w { break; }
-                    let alpha = bm_buf[py * bm_pitch + px];
-                    if alpha > 0 {
+                    let base = py * bm_pitch + px * 3;
+                    let r = if base < bm_buf.len() { bm_buf[base] } else { 0 };
+                    let g = if base + 1 < bm_buf.len() { bm_buf[base + 1] } else { 0 };
+                    let b = if base + 2 < bm_buf.len() { bm_buf[base + 2] } else { 0 };
+                    if r > 0 || g > 0 || b > 0 {
                         let dst_off = dst_y * bmp_bpr + dst_x * 4;
-                        render_buf[dst_off] = 255;
-                        render_buf[dst_off + 1] = 255;
-                        render_buf[dst_off + 2] = 255;
-                        render_buf[dst_off + 3] = alpha;
+                        render_buf[dst_off] = r;
+                        render_buf[dst_off + 1] = g;
+                        render_buf[dst_off + 2] = b;
+                        render_buf[dst_off + 3] = r.max(g).max(b);
                     }
                 }
             }
@@ -517,7 +534,7 @@ impl GlyphAtlas {
                 == freetype::bitmap::PixelMode::Bgra;
 
         if !is_color {
-            if face.load_char(first_char as usize, LoadFlag::RENDER | LoadFlag::FORCE_AUTOHINT | LoadFlag::TARGET_LIGHT).is_err() {
+            if face.load_char(first_char as usize, LoadFlag::RENDER | LoadFlag::TARGET_LCD).is_err() {
                 return None;
             }
         }
@@ -531,12 +548,12 @@ impl GlyphAtlas {
         let ascent = (metrics.ascender as f64 / 64.0).round() as i32;
         let y_off = (ascent - bitmap_top).max(0) as usize;
 
-        let bm_w = bitmap.width() as usize;
         let bm_h = bitmap.rows() as usize;
         let bm_pitch = bitmap.pitch().unsigned_abs() as usize;
         let bm_buf = bitmap.buffer();
 
         if is_color {
+            let bm_w = bitmap.width() as usize;
             for py in 0..bm_h {
                 let dst_y = y_off + py;
                 if dst_y >= bmp_h { break; }
@@ -554,19 +571,24 @@ impl GlyphAtlas {
                 }
             }
         } else {
+            let bm_w_bytes = bitmap.width() as usize;
+            let bm_w = (bm_w_bytes + 2) / 3;
             for py in 0..bm_h {
                 let dst_y = y_off + py;
                 if dst_y >= bmp_h { break; }
                 for px in 0..bm_w {
                     let dst_x = bitmap_left + px;
                     if dst_x >= bmp_w { break; }
-                    let alpha = bm_buf[py * bm_pitch + px];
-                    if alpha > 0 {
+                    let base = py * bm_pitch + px * 3;
+                    let r = if base < bm_buf.len() { bm_buf[base] } else { 0 };
+                    let g = if base + 1 < bm_buf.len() { bm_buf[base + 1] } else { 0 };
+                    let b = if base + 2 < bm_buf.len() { bm_buf[base + 2] } else { 0 };
+                    if r > 0 || g > 0 || b > 0 {
                         let dst_off = dst_y * bmp_bpr + dst_x * 4;
-                        render_buf[dst_off] = 255;
-                        render_buf[dst_off + 1] = 255;
-                        render_buf[dst_off + 2] = 255;
-                        render_buf[dst_off + 3] = alpha;
+                        render_buf[dst_off] = r;
+                        render_buf[dst_off + 1] = g;
+                        render_buf[dst_off + 2] = b;
+                        render_buf[dst_off + 3] = r.max(g).max(b);
                     }
                 }
             }
