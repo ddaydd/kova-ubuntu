@@ -122,6 +122,10 @@ impl ApplicationHandler for App {
                     event_loop.exit();
                 }
             }
+            WindowAction::SaveSession => {
+                self.save_session();
+                log::info!("Session saved manually");
+            }
             WindowAction::NewWindow => {
                 let tab =
                     crate::pane::Tab::new(&self.config).expect("failed to create tab");
@@ -181,4 +185,5 @@ pub enum WindowAction {
     None,
     CloseWindow,
     NewWindow,
+    SaveSession,
 }

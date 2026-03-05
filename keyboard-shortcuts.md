@@ -74,4 +74,6 @@
 | Page Up / Page Down | Scroll |
 | Insert | Insert mode toggle |
 | Delete | Forward delete |
-| F1..F4 | Function keys (VT220) |
+| F1 | Toggle help overlay |
+| F2..F4 | Function keys (VT220) |
+| F11 | Toggle fullscreen |

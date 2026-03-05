@@ -153,7 +153,7 @@ impl Default for ColorsConfig {
     fn default() -> Self {
         ColorsConfig {
             foreground: [1.0, 1.0, 1.0],
-            background: [0.1, 0.1, 0.12],
+            background: [0.118, 0.118, 0.18],
             cursor: [0.8, 0.8, 0.8],
         }
     }
@@ -258,6 +258,8 @@ pub struct KeysConfig {
     pub resize_up: String,
     pub resize_down: String,
     pub toggle_help: String,
+    pub save_session: String,
+    pub toggle_fullscreen: String,
     pub terminal: TerminalKeysConfig,
 }
 
@@ -305,6 +307,8 @@ impl Default for KeysConfig {
             resize_up: "cmd+ctrl+up".into(),
             resize_down: "cmd+ctrl+down".into(),
             toggle_help: "f1".into(),
+            save_session: "cmd+s".into(),
+            toggle_fullscreen: "f11".into(),
             terminal: TerminalKeysConfig::default(),
         }
     }

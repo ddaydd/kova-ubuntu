@@ -43,6 +43,16 @@ cargo build --release
 sudo cp target/release/kova /usr/local/bin/
 ```
 
+### Desktop integration
+
+```bash
+kova --install              # menu d'apps + "Ouvrir avec" pour les dossiers
+kova --install --autostart  # idem + lancement au login
+kova --uninstall            # supprime l'intégration
+```
+
+Code dans `install.rs`.
+
 ## Config
 
 `~/.config/kova/config.toml` — voir `config.rs` pour les options disponibles.

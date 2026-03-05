@@ -264,7 +264,7 @@ impl GlyphAtlas {
         // Try to find a font that supports this codepoint
         // fontconfig doesn't have a direct "find font for char" in the Rust binding,
         // so we try common fallback fonts
-        let fallback_names = ["Noto Color Emoji", "Noto Sans", "Noto Sans Mono", "DejaVu Sans", "Liberation Mono", "FreeMono"];
+        let fallback_names = ["Noto Color Emoji", "Noto Sans Symbols", "Noto Sans Symbols2", "Noto Sans", "Noto Sans Mono", "DejaVu Sans", "Liberation Mono", "FreeMono"];
         for name in &fallback_names {
             if let Some(font) = fc.find(name, None) {
                 if let Ok(face) = self.ft_lib.new_face(&font.path, 0) {

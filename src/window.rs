@@ -4,7 +4,7 @@ use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{Window, WindowAttributes, WindowId};
+use winit::window::{Fullscreen, Window, WindowAttributes, WindowId};
 
 use crate::app::WindowAction;
 use crate::config::Config;
@@ -98,7 +98,7 @@ impl KovaWindow {
         let surface_format = surface_caps
             .formats
             .iter()
-            .find(|f| f.is_srgb())
+            .find(|f| !f.is_srgb())
             .copied()
             .unwrap_or(surface_caps.formats[0]);
 
@@ -404,6 +404,7 @@ impl KovaWindow {
 
                 // Check window-level keybindings
                 let combo = KeyCombo::from_winit(&event.logical_key, &self.modifiers);
+                log::debug!("Key event: {:?} -> combo: {:?}", event.logical_key, combo);
 
                 if let Some(action) = self.keybindings.window_map.get(&combo).cloned() {
                     match action {
@@ -442,7 +443,17 @@ impl KovaWindow {
                             }
                         }
                         Action::ToggleFilter => self.toggle_filter(),
+                        Action::ToggleFullscreen => {
+                            let is_fullscreen = self.window.fullscreen().is_some();
+                            log::info!("ToggleFullscreen: currently fullscreen={}", is_fullscreen);
+                            if is_fullscreen {
+                                self.window.set_fullscreen(None);
+                            } else {
+                                self.window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+                            }
+                        }
                         Action::ToggleHelp => self.show_help = !self.show_help,
+                        Action::SaveSession => return WindowAction::SaveSession,
                         Action::ClearScrollback => {
                             if let Some(pane) = self.focused_pane() {
                                 pane.terminal.write().clear_scrollback_and_screen();
@@ -489,6 +500,8 @@ impl KovaWindow {
                     }
                     return WindowAction::None;
                 }
+
+                log::debug!("Key not matched by keybindings: {:?}", combo);
 
                 // Forward to terminal input handler
                 if let Some(pane) = self.focused_pane() {

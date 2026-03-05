@@ -98,6 +98,8 @@ min_width = 300.0  # minimum pane width in points before horizontal scroll activ
 | Super+K | Clear scrollback and screen |
 | Super+C | Copy selection |
 | Super+V | Paste |
+| F1 | Toggle help overlay |
+| F11 | Toggle fullscreen |
 
 ## Prerequisites
 
@@ -121,6 +123,19 @@ The binary lands in `target/release/kova`.
 ```bash
 cargo build --release
 sudo cp target/release/kova /usr/local/bin/
+```
+
+### Desktop integration
+
+```bash
+# Register Kova in app menu + "Open With" for folders
+kova --install
+
+# Same + auto-start at login
+kova --install --autostart
+
+# Remove desktop integration
+kova --uninstall
 ```
 
 ### Run

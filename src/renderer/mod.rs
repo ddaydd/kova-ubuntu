@@ -1043,6 +1043,7 @@ impl Renderer {
             ("Super+N",            "New window"),
             ("Super+Q",            "Close window"),
             ("F1",                 "Toggle this help"),
+            ("F11",                "Toggle fullscreen"),
         ];
 
         let content_h = (shortcuts.len() as f32 + 3.0) * cell_h; // title + blank + shortcuts + blank

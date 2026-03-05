@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod input;
+mod install;
 mod keybindings;
 mod pane;
 mod renderer;
@@ -52,8 +53,37 @@ fn setup_logging() {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("Kova — Fast GPU-accelerated terminal");
+        println!();
+        println!("Usage: kova [OPTIONS]");
+        println!();
+        println!("Options:");
+        println!("  --install             Register in app menu and 'Open With' for folders");
+        println!("  --install --autostart Same + auto-start at login");
+        println!("  --uninstall           Remove desktop integration");
+        println!("  --list-sessions       List saved session backups");
+        println!("  --session <N>         Restore session backup N");
+        println!("  -h, --help            Show this help");
+        println!();
+        println!("Config: ~/.config/kova/config.toml");
+        println!("Logs:   ~/.local/share/kova/logs/kova.log");
+        return;
+    }
+
     if args.iter().any(|a| a == "--list-sessions") {
         session::list_session_backups();
+        return;
+    }
+
+    if args.iter().any(|a| a == "--install") {
+        let autostart = args.iter().any(|a| a == "--autostart");
+        install::install(autostart);
+        return;
+    }
+
+    if args.iter().any(|a| a == "--uninstall") {
+        install::uninstall();
         return;
     }
 
