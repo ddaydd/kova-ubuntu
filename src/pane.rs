@@ -51,9 +51,11 @@ pub enum NavDirection {
 
 
 pub type TabId = u32;
+pub type ProjectId = u32;
 
 static NEXT_PANE_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 static NEXT_TAB_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+static NEXT_PROJECT_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 
 fn alloc_pane_id() -> PaneId {
     NEXT_PANE_ID.fetch_add(1, Ordering::Relaxed)
@@ -61,6 +63,54 @@ fn alloc_pane_id() -> PaneId {
 
 pub(crate) fn alloc_tab_id() -> TabId {
     NEXT_TAB_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn alloc_project_id() -> ProjectId {
+    NEXT_PROJECT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// A project groups tabs that share the same root directory.
+pub struct Project {
+    pub id: ProjectId,
+    pub root_dir: String,
+    pub tabs: Vec<Tab>,
+    pub active_tab: usize,
+}
+
+impl Project {
+    pub fn new(root_dir: String, tab: Tab) -> Self {
+        Project {
+            id: alloc_project_id(),
+            root_dir,
+            tabs: vec![tab],
+            active_tab: 0,
+        }
+    }
+
+    pub fn new_restored(root_dir: String, tabs: Vec<Tab>, active_tab: usize) -> Self {
+        Project {
+            id: alloc_project_id(),
+            root_dir,
+            tabs,
+            active_tab,
+        }
+    }
+
+    /// Short display name: last path component.
+    pub fn name(&self) -> String {
+        std::path::Path::new(&self.root_dir)
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_else(|| self.root_dir.clone())
+    }
+
+    pub fn active_tab(&self) -> Option<&Tab> {
+        self.tabs.get(self.active_tab)
+    }
+
+    pub fn active_tab_mut(&mut self) -> Option<&mut Tab> {
+        self.tabs.get_mut(self.active_tab)
+    }
 }
 
 /// A tab: owns a split tree and tracks which pane is focused within it.

@@ -1,5 +1,35 @@
 # Kova Linux — Notes de version
 
+## 2026-03-05
+
+### F11 fullscreen + F1 help update
+- F11 toggle fullscreen ajouté à l'overlay aide F1
+
+### Desktop integration (`--install`)
+- `kova --install` : symlink `~/.local/bin/kova`, fichier `.desktop`, action Nemo (clic droit "Open in Kova")
+- `kova --install --autostart` : idem + lancement au login
+- `kova --uninstall` : supprime tout
+- `kova --help` : affiche toutes les options CLI
+
+### Argument répertoire
+- `kova /chemin` ouvre le terminal dans le dossier spécifié
+- Fonctionne avec "Ouvrir avec" depuis le gestionnaire de fichiers
+
+### Fix flash au démarrage
+- Fenêtre créée invisible, premier frame rendu, puis affichée — supprime le flash de framebuffer résiduel
+
+### Projects (groupement de tabs par dossier)
+- Nouvelle structure `Project` : regroupe les tabs par dossier racine
+- Project bar au-dessus de la tab bar (visible quand >1 projet)
+- Clic sur un projet pour switcher
+- "Open With" un dossier : crée ou rejoint un projet existant
+- Session sauvegarde/restaure les projets (backward compat v2)
+
+### Instance unique (IPC socket Unix)
+- Socket `/run/user/$UID/kova.sock`
+- `kova /chemin` envoie le path à l'instance existante au lieu d'en lancer une nouvelle
+- L'instance reçoit le path et ouvre/focus le projet correspondant
+
 ## v1.0.0 — Port Linux (2026-03-04)
 
 Fork du terminal macOS [Kova](https://github.com/ddaydd/kova) porté vers Linux.

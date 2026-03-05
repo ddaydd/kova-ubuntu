@@ -10,7 +10,7 @@ use crate::app::WindowAction;
 use crate::config::Config;
 use crate::input;
 use crate::keybindings::{Action, KeyCombo, Keybindings};
-use crate::pane::{NavDirection, Pane, PaneId, SplitDirection, SplitTree, Tab};
+use crate::pane::{NavDirection, Pane, PaneId, Project, SplitDirection, SplitTree, Tab};
 use crate::renderer::{FilterRenderData, PaneViewport, Renderer};
 use crate::session::WindowSession;
 use crate::terminal::{FilterMatch, TerminalState};
@@ -31,8 +31,8 @@ pub struct KovaWindow {
     queue: wgpu::Queue,
     surface_config: wgpu::SurfaceConfiguration,
     renderer: Renderer,
-    tabs: Vec<Tab>,
-    active_tab: usize,
+    projects: Vec<Project>,
+    active_project: usize,
     keybindings: Keybindings,
     config: Config,
     last_scale: f64,
@@ -55,11 +55,12 @@ impl KovaWindow {
     pub fn new(
         event_loop: &ActiveEventLoop,
         config: &Config,
-        tabs: Vec<Tab>,
-        active_tab: usize,
+        projects: Vec<Project>,
+        active_project: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let attrs = WindowAttributes::default()
             .with_title("Kova")
+            .with_visible(false)
             .with_inner_size(LogicalSize::new(config.window.width, config.window.height));
 
         let window = Arc::new(event_loop.create_window(attrs)?);
@@ -126,8 +127,8 @@ impl KovaWindow {
             queue,
             surface_config,
             renderer,
-            tabs,
-            active_tab,
+            projects,
+            active_project,
             keybindings,
             config: config.clone(),
             last_scale: scale,
@@ -143,8 +144,10 @@ impl KovaWindow {
             help_hint_frames: fps * 3,
         };
 
-        // Initial resize
+        // Initial resize + first render, then show window
         win.resize_all_panes();
+        win.render();
+        win.window.set_visible(true);
 
         Ok(win)
     }
@@ -155,6 +158,55 @@ impl KovaWindow {
 
     pub fn request_redraw(&self) {
         self.window.request_redraw();
+    }
+
+    // --- Project/Tab helpers ---
+
+    fn project(&self) -> &Project {
+        &self.projects[self.active_project]
+    }
+
+    fn project_mut(&mut self) -> &mut Project {
+        &mut self.projects[self.active_project]
+    }
+
+    fn tabs(&self) -> &[Tab] {
+        &self.project().tabs
+    }
+
+    fn active_tab_idx(&self) -> usize {
+        self.project().active_tab
+    }
+
+    /// Add a new project or focus existing one for the given directory.
+    pub fn open_project(&mut self, dir: &str) {
+        // Check if project already exists
+        for (i, proj) in self.projects.iter().enumerate() {
+            if proj.root_dir == dir {
+                self.active_project = i;
+                // Add a new tab in the existing project
+                match crate::pane::Tab::new_with_cwd(&self.config, Some(dir)) {
+                    Ok(tab) => {
+                        let proj = &mut self.projects[i];
+                        proj.tabs.push(tab);
+                        proj.active_tab = proj.tabs.len() - 1;
+                        self.resize_all_panes();
+                    }
+                    Err(e) => log::error!("Failed to create tab: {}", e),
+                }
+                return;
+            }
+        }
+        // New project
+        match crate::pane::Tab::new_with_cwd(&self.config, Some(dir)) {
+            Ok(tab) => {
+                let proj = Project::new(dir.to_string(), tab);
+                self.projects.push(proj);
+                self.active_project = self.projects.len() - 1;
+                self.resize_all_panes();
+            }
+            Err(e) => log::error!("Failed to create project: {}", e),
+        }
     }
 
     pub fn session_data(&self) -> WindowSession {
@@ -168,7 +220,7 @@ impl KovaWindow {
                 size.height as f64,
             )
         });
-        WindowSession::from_tabs(&self.tabs, self.active_tab, frame)
+        WindowSession::from_projects(&self.projects, self.active_project, frame)
     }
 
     /// Per-frame tick. Returns false if window should close.
@@ -178,8 +230,9 @@ impl KovaWindow {
         }
 
         // Reap dead panes
+        let proj = &self.projects[self.active_project];
         let mut dead_ids = Vec::new();
-        if let Some(tab) = self.tabs.get(self.active_tab) {
+        if let Some(tab) = proj.tabs.get(proj.active_tab) {
             dead_ids = tab.tree.exited_pane_ids();
         }
         for id in dead_ids {
@@ -187,10 +240,12 @@ impl KovaWindow {
         }
 
         // Inject pending commands
-        for tab in &self.tabs {
-            tab.tree.for_each_pane(&mut |pane| {
-                pane.inject_pending_command();
-            });
+        for proj in &self.projects {
+            for tab in &proj.tabs {
+                tab.tree.for_each_pane(&mut |pane| {
+                    pane.inject_pending_command();
+                });
+            }
         }
 
         // Git branch polling
@@ -208,8 +263,10 @@ impl KovaWindow {
         }
 
         // Check bells
-        for tab in &mut self.tabs {
-            tab.check_bell();
+        for proj in &mut self.projects {
+            for tab in &mut proj.tabs {
+                tab.check_bell();
+            }
         }
 
         // Help hint countdown
@@ -220,17 +277,20 @@ impl KovaWindow {
         // Render
         self.render();
 
-        !self.tabs.is_empty()
+        !self.projects.is_empty()
     }
 
     fn render(&mut self) {
-        let tab = match self.tabs.get(self.active_tab) {
+        let proj = match self.projects.get(self.active_project) {
+            Some(p) => p,
+            None => return,
+        };
+        let tab = match proj.tabs.get(proj.active_tab) {
             Some(t) => t,
             None => return,
         };
 
         let size = self.window.inner_size();
-        let scale = self.window.scale_factor() as f32;
         let viewport_w = size.width as f32;
         let viewport_h = size.height as f32;
 
@@ -238,11 +298,13 @@ impl KovaWindow {
             return;
         }
 
-        let (cell_w, cell_h) = self.renderer.cell_size();
-        let tab_bar_h = if self.tabs.len() > 1 { (cell_h * 2.0).round() } else { 0.0 };
+        let (_, cell_h) = self.renderer.cell_size();
+        let project_bar_h = if self.projects.len() > 1 { (cell_h * 1.5).round() } else { 0.0 };
+        let tab_bar_h = if proj.tabs.len() > 1 { (cell_h * 2.0).round() } else { 0.0 };
         let global_bar_h = cell_h;
-        let pane_area_y = tab_bar_h;
-        let pane_area_h = viewport_h - tab_bar_h - global_bar_h;
+        let bars_h = project_bar_h + tab_bar_h;
+        let pane_area_y = bars_h;
+        let pane_area_h = viewport_h - bars_h - global_bar_h;
 
         let total_vp = PaneViewport {
             x: 0.0,
@@ -268,19 +330,29 @@ impl KovaWindow {
         let mut separators = Vec::new();
         tab.tree.collect_separators(total_vp, &mut separators);
 
+        // Project titles
+        let project_titles: Vec<(String, bool)> = if self.projects.len() > 1 {
+            self.projects.iter().enumerate()
+                .map(|(i, p)| (p.name(), i == self.active_project))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         // Tab titles
-        let tab_titles: Vec<(String, bool, Option<usize>, bool, bool)> = if self.tabs.len() > 1 {
-            self.tabs
+        let active_tab_idx = proj.active_tab;
+        let tab_titles: Vec<(String, bool, Option<usize>, bool, bool)> = if proj.tabs.len() > 1 {
+            proj.tabs
                 .iter()
                 .enumerate()
                 .map(|(i, t)| {
-                    let is_renaming = i == self.active_tab && self.rename_tab.is_some();
+                    let is_renaming = i == active_tab_idx && self.rename_tab.is_some();
                     let title = if is_renaming {
                         self.rename_tab.as_ref().unwrap().input.clone()
                     } else {
                         t.title()
                     };
-                    (title, i == self.active_tab, t.color, is_renaming, t.has_bell)
+                    (title, i == active_tab_idx, t.color, is_renaming, t.has_bell)
                 })
                 .collect()
         } else {
@@ -298,11 +370,12 @@ impl KovaWindow {
             &self.surface,
             &panes,
             &separators,
+            &project_titles,
             &tab_titles,
             filter_data.as_ref(),
             self.show_help,
             self.help_hint_frames,
-            0.0, // no traffic light inset on Linux
+            0.0,
             0,
             0,
         );
@@ -360,7 +433,7 @@ impl KovaWindow {
                     match &event.logical_key {
                         Key::Named(NamedKey::Enter) => {
                             let new_title = rename.input.clone();
-                            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                            if let Some(tab) = self.project_mut().active_tab_mut() {
                                 tab.custom_title = if new_title.is_empty() {
                                     None
                                 } else {
@@ -426,16 +499,17 @@ impl KovaWindow {
                         Action::PrevTab => self.do_switch_tab_relative(-1),
                         Action::NextTab => self.do_switch_tab_relative(1),
                         Action::SwitchTab(idx) => {
-                            if idx < self.tabs.len() {
-                                self.active_tab = idx;
-                                self.tabs[idx].clear_bell();
+                            let proj = self.project_mut();
+                            if idx < proj.tabs.len() {
+                                proj.active_tab = idx;
+                                proj.tabs[idx].clear_bell();
                                 self.resize_all_panes();
                             }
                         }
                         Action::Navigate(dir) => self.do_navigate(dir),
                         Action::SwapPane(dir) => self.do_swap_pane(dir),
                         Action::Resize(axis, delta) => {
-                            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                            if let Some(tab) = self.project_mut().active_tab_mut() {
                                 let focused_id = tab.focused_pane;
                                 if tab.tree.adjust_ratio_for_pane(focused_id, delta, axis) {
                                     self.resize_all_panes();
@@ -461,7 +535,7 @@ impl KovaWindow {
                             }
                         }
                         Action::RenameTab => {
-                            let current = self.tabs.get(self.active_tab)
+                            let current = self.project().active_tab()
                                 .and_then(|t| t.custom_title.clone())
                                 .unwrap_or_default();
                             self.rename_tab = Some(RenameTabState { input: current });
@@ -530,22 +604,33 @@ impl KovaWindow {
                 let scale = self.window.scale_factor();
                 let x = self.mouse_x / scale;
                 let y = self.mouse_y / scale;
-                let (_, cell_h) = self.renderer.cell_size();
-                let bar_h = (cell_h * 2.0) as f64;
+                let (cell_w, cell_h) = self.renderer.cell_size();
+                let project_bar_h = if self.projects.len() > 1 { (cell_h * 1.5).round() } else { 0.0 };
+                let tab_bar_h = if self.project().tabs.len() > 1 { (cell_h * 2.0).round() } else { 0.0 };
 
-                if y < bar_h && !self.tabs.is_empty() {
-                    // Click in tab bar — switch tab
-                    let cell_w = self.renderer.cell_size().0 as f64;
+                if self.projects.len() > 1 && (y as f32) < project_bar_h {
+                    // Click in project bar — switch project
                     let viewport_w = self.surface_config.width as f64 / scale;
-                    let max_tab_w = cell_w * 20.0;
-                    let tab_width = (viewport_w / self.tabs.len() as f64).min(max_tab_w);
+                    let max_proj_w = cell_w as f64 * 20.0;
+                    let proj_width = (viewport_w / self.projects.len() as f64).min(max_proj_w);
+                    let clicked = (x / proj_width) as usize;
+                    if clicked < self.projects.len() {
+                        self.active_project = clicked;
+                        self.resize_all_panes();
+                    }
+                } else if self.project().tabs.len() > 1 && (y as f32) < project_bar_h + tab_bar_h {
+                    // Click in tab bar — switch tab
+                    let viewport_w = self.surface_config.width as f64 / scale;
+                    let max_tab_w = cell_w as f64 * 20.0;
+                    let tabs = &self.project().tabs;
+                    let tab_width = (viewport_w / tabs.len() as f64).min(max_tab_w);
                     let clicked_tab = (x / tab_width) as usize;
-                    if clicked_tab < self.tabs.len() {
-                        self.active_tab = clicked_tab;
+                    if clicked_tab < tabs.len() {
+                        self.project_mut().active_tab = clicked_tab;
+                        self.project_mut().tabs[clicked_tab].clear_bell();
                         self.resize_all_panes();
                     }
                 }
-                // TODO: implement mouse selection, separator drag
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
@@ -578,14 +663,13 @@ impl KovaWindow {
     }
 
     fn focused_pane(&self) -> Option<&Pane> {
-        self.tabs
-            .get(self.active_tab)
-            .and_then(|tab| tab.tree.pane(tab.focused_pane))
+        let proj = self.projects.get(self.active_project)?;
+        let tab = proj.tabs.get(proj.active_tab)?;
+        tab.tree.pane(tab.focused_pane)
     }
 
     fn resize_all_panes(&mut self) {
         let size = self.window.inner_size();
-        let scale = self.window.scale_factor() as f32;
         let viewport_w = size.width as f32;
         let viewport_h = size.height as f32;
 
@@ -594,7 +678,12 @@ impl KovaWindow {
         }
 
         let (cell_w, cell_h) = self.renderer.cell_size();
-        let tab_bar_h = if self.tabs.len() > 1 {
+        let project_bar_h = if self.projects.len() > 1 { (cell_h * 1.5).round() } else { 0.0 };
+        let proj = match self.projects.get(self.active_project) {
+            Some(p) => p,
+            None => return,
+        };
+        let tab_bar_h = if proj.tabs.len() > 1 {
             (cell_h * 2.0).round()
         } else {
             0.0
@@ -605,8 +694,9 @@ impl KovaWindow {
         } else {
             0.0
         };
-        let pane_area_y = tab_bar_h;
-        let pane_area_h = viewport_h - tab_bar_h - global_bar_h;
+        let bars_h = project_bar_h + tab_bar_h;
+        let pane_area_y = bars_h;
+        let pane_area_h = viewport_h - bars_h - global_bar_h;
 
         let total_vp = PaneViewport {
             x: 0.0,
@@ -615,7 +705,7 @@ impl KovaWindow {
             height: pane_area_h,
         };
 
-        if let Some(tab) = self.tabs.get(self.active_tab) {
+        if let Some(tab) = proj.tabs.get(proj.active_tab) {
             tab.tree
                 .for_each_pane_with_viewport(total_vp, &mut |pane, vp| {
                     let usable_h = vp.height - status_bar_h;
@@ -637,8 +727,9 @@ impl KovaWindow {
         let cwd = self.focused_pane().and_then(|p| p.cwd());
         match crate::pane::Tab::new_with_cwd(&self.config, cwd.as_deref()) {
             Ok(tab) => {
-                self.tabs.push(tab);
-                self.active_tab = self.tabs.len() - 1;
+                let proj = self.project_mut();
+                proj.tabs.push(tab);
+                proj.active_tab = proj.tabs.len() - 1;
                 self.resize_all_panes();
             }
             Err(e) => log::error!("Failed to create tab: {}", e),
@@ -646,36 +737,51 @@ impl KovaWindow {
     }
 
     fn do_close_pane_or_tab(&mut self) {
-        if let Some(tab) = self.tabs.get(self.active_tab) {
-            let focused = tab.focused_pane;
-            self.close_pane(focused);
-        }
+        let focused = {
+            let proj = self.project();
+            match proj.tabs.get(proj.active_tab) {
+                Some(tab) => tab.focused_pane,
+                None => return,
+            }
+        };
+        self.close_pane(focused);
     }
 
     fn close_pane(&mut self, pane_id: PaneId) {
-        if self.active_tab >= self.tabs.len() {
+        let proj = self.project_mut();
+        if proj.active_tab >= proj.tabs.len() {
             return;
         }
 
         let Tab { tree, mut focused_pane, id, custom_title, color, has_bell, scroll_offset_x, virtual_width_override } =
-            self.tabs.remove(self.active_tab);
+            proj.tabs.remove(proj.active_tab);
 
         match tree.remove_pane(pane_id) {
             Some(new_tree) => {
                 if new_tree.pane(focused_pane).is_none() {
                     focused_pane = new_tree.first_pane().id;
                 }
-                self.tabs.insert(self.active_tab, Tab {
+                let proj = self.project_mut();
+                proj.tabs.insert(proj.active_tab, Tab {
                     id, tree: new_tree, focused_pane, custom_title, color, has_bell, scroll_offset_x, virtual_width_override,
                 });
                 self.resize_all_panes();
             }
             None => {
                 // Tab has no more panes
-                if self.tabs.is_empty() {
-                    self.closing = true;
+                let proj = self.project_mut();
+                if proj.tabs.is_empty() {
+                    // Remove this project
+                    let proj_idx = self.active_project;
+                    self.projects.remove(proj_idx);
+                    if self.projects.is_empty() {
+                        self.closing = true;
+                    } else {
+                        self.active_project = self.active_project.min(self.projects.len() - 1);
+                        self.resize_all_panes();
+                    }
                 } else {
-                    self.active_tab = self.active_tab.min(self.tabs.len() - 1);
+                    proj.active_tab = proj.active_tab.min(proj.tabs.len() - 1);
                     self.resize_all_panes();
                 }
             }
@@ -683,11 +789,12 @@ impl KovaWindow {
     }
 
     fn do_split(&mut self, direction: SplitDirection) {
-        if self.active_tab >= self.tabs.len() {
+        let proj = self.project_mut();
+        if proj.active_tab >= proj.tabs.len() {
             return;
         }
         let Tab { tree, mut focused_pane, id, custom_title, color, has_bell, scroll_offset_x, virtual_width_override } =
-            self.tabs.remove(self.active_tab);
+            proj.tabs.remove(proj.active_tab);
         let cwd = tree.pane(focused_pane).and_then(|p| p.cwd());
         let new_tree = match Pane::spawn(
             self.config.terminal.columns,
@@ -705,18 +812,20 @@ impl KovaWindow {
                 tree
             }
         };
-        self.tabs.insert(self.active_tab, Tab {
+        let proj = self.project_mut();
+        proj.tabs.insert(proj.active_tab, Tab {
             id, tree: new_tree, focused_pane, custom_title, color, has_bell, scroll_offset_x, virtual_width_override,
         });
         self.resize_all_panes();
     }
 
     fn do_split_root(&mut self, direction: SplitDirection) {
-        if self.active_tab >= self.tabs.len() {
+        let proj = self.project_mut();
+        if proj.active_tab >= proj.tabs.len() {
             return;
         }
         let Tab { tree, mut focused_pane, id, custom_title, color, has_bell, scroll_offset_x, virtual_width_override } =
-            self.tabs.remove(self.active_tab);
+            proj.tabs.remove(proj.active_tab);
         let cwd = tree.pane(focused_pane).and_then(|p| p.cwd());
         let mut new_tree = match Pane::spawn(
             self.config.terminal.columns,
@@ -747,60 +856,72 @@ impl KovaWindow {
             }
         };
         new_tree.equalize();
-        self.tabs.insert(self.active_tab, Tab {
+        let proj = self.project_mut();
+        proj.tabs.insert(proj.active_tab, Tab {
             id, tree: new_tree, focused_pane, custom_title, color, has_bell, scroll_offset_x, virtual_width_override,
         });
         self.resize_all_panes();
     }
 
     fn do_switch_tab_relative(&mut self, delta: i32) {
-        if self.tabs.is_empty() {
+        let proj = self.project_mut();
+        if proj.tabs.is_empty() {
             return;
         }
-        let len = self.tabs.len() as i32;
-        let new_idx = ((self.active_tab as i32 + delta) % len + len) % len;
-        self.active_tab = new_idx as usize;
-        self.tabs[self.active_tab].clear_bell();
+        let len = proj.tabs.len() as i32;
+        let new_idx = ((proj.active_tab as i32 + delta) % len + len) % len;
+        proj.active_tab = new_idx as usize;
+        proj.tabs[new_idx as usize].clear_bell();
         self.resize_all_panes();
     }
 
     fn do_navigate(&mut self, dir: NavDirection) {
-        let tab = match self.tabs.get(self.active_tab) {
+        let proj = match self.projects.get(self.active_project) {
+            Some(p) => p,
+            None => return,
+        };
+        let tab = match proj.tabs.get(proj.active_tab) {
             Some(t) => t,
             None => return,
         };
 
         let size = self.window.inner_size();
-        let (cell_w, cell_h) = self.renderer.cell_size();
-        let tab_bar_h = if self.tabs.len() > 1 { (cell_h * 2.0).round() } else { 0.0 };
+        let (_, cell_h) = self.renderer.cell_size();
+        let project_bar_h = if self.projects.len() > 1 { (cell_h * 1.5).round() } else { 0.0 };
+        let tab_bar_h = if proj.tabs.len() > 1 { (cell_h * 2.0).round() } else { 0.0 };
         let global_bar_h = cell_h;
+        let bars_h = project_bar_h + tab_bar_h;
         let total_vp = PaneViewport {
             x: 0.0,
-            y: tab_bar_h,
+            y: bars_h,
             width: size.width as f32,
-            height: size.height as f32 - tab_bar_h - global_bar_h,
+            height: size.height as f32 - bars_h - global_bar_h,
         };
 
         if let Some(neighbor) = tab.tree.neighbor(tab.focused_pane, dir, total_vp) {
-            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-                tab.focused_pane = neighbor;
-            }
+            self.project_mut().active_tab_mut().unwrap().focused_pane = neighbor;
         }
     }
 
     fn do_swap_pane(&mut self, dir: NavDirection) {
         let size = self.window.inner_size();
-        let (cell_w, cell_h) = self.renderer.cell_size();
-        let tab_bar_h = if self.tabs.len() > 1 { (cell_h * 2.0).round() } else { 0.0 };
+        let (_, cell_h) = self.renderer.cell_size();
+        let project_bar_h = if self.projects.len() > 1 { (cell_h * 1.5).round() } else { 0.0 };
+        let proj = match self.projects.get(self.active_project) {
+            Some(p) => p,
+            None => return,
+        };
+        let tab_bar_h = if proj.tabs.len() > 1 { (cell_h * 2.0).round() } else { 0.0 };
         let global_bar_h = cell_h;
+        let bars_h = project_bar_h + tab_bar_h;
         let total_vp = PaneViewport {
             x: 0.0,
-            y: tab_bar_h,
+            y: bars_h,
             width: size.width as f32,
-            height: size.height as f32 - tab_bar_h - global_bar_h,
+            height: size.height as f32 - bars_h - global_bar_h,
         };
 
-        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+        if let Some(tab) = self.project_mut().active_tab_mut() {
             let focused = tab.focused_pane;
             if let Some(neighbor) = tab.tree.neighbor(focused, dir, total_vp) {
                 tab.tree.swap_panes(focused, neighbor);

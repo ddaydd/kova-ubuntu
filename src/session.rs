@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use crate::config::Config;
-use crate::pane::{alloc_tab_id, Pane, PaneId, SplitTree, Tab};
+use crate::pane::{alloc_tab_id, Pane, PaneId, Project, SplitTree, Tab};
 
 const SESSION_VERSION: u32 = 2;
 
@@ -14,8 +14,23 @@ pub struct Session {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct WindowSession {
+pub struct SavedProject {
+    pub root_dir: String,
     pub tabs: Vec<SavedTab>,
+    pub active_tab: usize,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct WindowSession {
+    /// Projects (v3). Falls back to legacy tabs field for v2 compat.
+    #[serde(default)]
+    pub projects: Vec<SavedProject>,
+    #[serde(default)]
+    pub active_project: usize,
+    /// Legacy flat tabs (v2 compat, ignored if projects is non-empty).
+    #[serde(default)]
+    pub tabs: Vec<SavedTab>,
+    #[serde(default)]
     pub active_tab: usize,
     /// Window frame: (x, y, width, height) in screen points.
     #[serde(default)]
@@ -113,11 +128,20 @@ fn snapshot_tabs(tabs: &[Tab]) -> Vec<SavedTab> {
 }
 
 impl WindowSession {
-    /// Build a WindowSession from live tab data.
-    pub fn from_tabs(tabs: &[Tab], active_tab: usize, frame: Option<(f64, f64, f64, f64)>) -> Self {
+    /// Build a WindowSession from live project data.
+    pub fn from_projects(projects: &[Project], active_project: usize, frame: Option<(f64, f64, f64, f64)>) -> Self {
+        let saved_projects: Vec<SavedProject> = projects.iter().map(|proj| {
+            SavedProject {
+                root_dir: proj.root_dir.clone(),
+                tabs: snapshot_tabs(&proj.tabs),
+                active_tab: proj.active_tab,
+            }
+        }).collect();
         Self {
-            tabs: snapshot_tabs(tabs),
-            active_tab,
+            projects: saved_projects,
+            active_project,
+            tabs: Vec::new(),
+            active_tab: 0,
             frame,
         }
     }
@@ -183,8 +207,8 @@ fn rotate_session_backups(path: &std::path::Path, new_content: &[u8]) {
 
 /// Loaded window data ready for restoration.
 pub struct RestoredWindow {
-    pub tabs: Vec<Tab>,
-    pub active_tab: usize,
+    pub projects: Vec<Project>,
+    pub active_project: usize,
     pub frame: Option<(f64, f64, f64, f64)>,
 }
 
@@ -250,6 +274,8 @@ pub fn load(backup: Option<usize>) -> Option<Session> {
             Session {
                 version: SESSION_VERSION,
                 windows: vec![WindowSession {
+                    projects: Vec::new(),
+                    active_project: 0,
                     tabs: v1.tabs,
                     active_tab: v1.active_tab,
                     frame: None,
@@ -355,12 +381,40 @@ pub fn restore_session(session: Session, config: &Config) -> Option<Vec<Restored
     let mut windows = Vec::new();
 
     for ws in &session.windows {
-        if let Some((tabs, active_tab)) = restore_window_tabs(ws, config) {
-            windows.push(RestoredWindow {
-                tabs,
-                active_tab,
-                frame: ws.frame,
-            });
+        // Try restoring from projects first (v3+)
+        if !ws.projects.is_empty() {
+            let mut projects = Vec::new();
+            for sp in &ws.projects {
+                let fake_ws = WindowSession {
+                    projects: Vec::new(),
+                    active_project: 0,
+                    tabs: sp.tabs.clone(),
+                    active_tab: sp.active_tab,
+                    frame: None,
+                };
+                if let Some((tabs, active_tab)) = restore_window_tabs(&fake_ws, config) {
+                    projects.push(Project::new_restored(sp.root_dir.clone(), tabs, active_tab));
+                }
+            }
+            if !projects.is_empty() {
+                let active_project = ws.active_project.min(projects.len() - 1);
+                windows.push(RestoredWindow {
+                    projects,
+                    active_project,
+                    frame: ws.frame,
+                });
+            }
+        } else if !ws.tabs.is_empty() {
+            // Legacy v2 format: single project from flat tabs
+            if let Some((tabs, active_tab)) = restore_window_tabs(ws, config) {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+                let proj = Project::new_restored(home, tabs, active_tab);
+                windows.push(RestoredWindow {
+                    projects: vec![proj],
+                    active_project: 0,
+                    frame: ws.frame,
+                });
+            }
         }
     }
 

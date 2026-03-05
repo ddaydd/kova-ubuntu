@@ -326,6 +326,7 @@ impl Renderer {
         surface: &wgpu::Surface,
         panes: &[(Arc<RwLock<TerminalState>>, PaneViewport, bool, bool, PaneId, Option<String>)],
         separators: &[(f32, f32, f32, f32)],
+        project_titles: &[(String, bool)],
         tab_titles: &[(String, bool, Option<usize>, bool, bool)],
         filter: Option<&FilterRenderData>,
         show_help: bool,
@@ -464,9 +465,17 @@ impl Renderer {
             }
         }
 
-        // Tab bar
+        // Project bar
+        let project_bar_h = if !project_titles.is_empty() {
+            self.build_project_bar_vertices(&mut all_vertices, viewport_w, project_titles);
+            (self.atlas.cell_height * 1.5).round()
+        } else {
+            0.0
+        };
+
+        // Tab bar (offset by project bar height)
         if !tab_titles.is_empty() {
-            self.build_tab_bar_vertices(&mut all_vertices, viewport_w, tab_titles, tab_bar_left_inset);
+            self.build_tab_bar_vertices(&mut all_vertices, viewport_w, tab_titles, tab_bar_left_inset, project_bar_h);
         }
 
         // Global status bar
@@ -804,13 +813,54 @@ impl Renderer {
         }
     }
 
-    fn build_tab_bar_vertices(&mut self, vertices: &mut Vec<Vertex>, viewport_w: f32, tab_titles: &[(String, bool, Option<usize>, bool, bool)], left_inset: f32) {
+    fn build_project_bar_vertices(&mut self, vertices: &mut Vec<Vertex>, viewport_w: f32, project_titles: &[(String, bool)]) {
+        let cell_w = self.atlas.cell_width;
+        let cell_h = self.atlas.cell_height;
+        let bar_h = (cell_h * 1.5).round();
+        let no_bg = [0.0, 0.0, 0.0, 0.0];
+
+        // Slightly darker than tab bar
+        let bar_bg = [
+            (self.tab_bar_bg[0] * 0.8).min(1.0),
+            (self.tab_bar_bg[1] * 0.8).min(1.0),
+            (self.tab_bar_bg[2] * 0.8).min(1.0),
+        ];
+        Self::push_bg_quad(vertices, 0.0, 0.0, viewport_w, bar_h, bar_bg);
+
+        let max_proj_w = cell_w * 20.0;
+        let proj_width = (viewport_w / project_titles.len() as f32).min(max_proj_w);
+
+        for (i, (name, is_active)) in project_titles.iter().enumerate() {
+            let x = i as f32 * proj_width;
+
+            if *is_active {
+                Self::push_bg_quad(vertices, x, 0.0, proj_width, bar_h, self.tab_bar_active_bg);
+                // Bottom accent
+                let accent_h = 3.0_f32;
+                Self::push_bg_quad(vertices, x, bar_h - accent_h, proj_width, accent_h, [0.4, 0.7, 0.5]);
+            }
+
+            let fg = if *is_active {
+                [1.0, 1.0, 1.0, 1.0]
+            } else {
+                [self.tab_bar_fg[0], self.tab_bar_fg[1], self.tab_bar_fg[2], 0.7]
+            };
+
+            let text_w = name.chars().count() as f32 * cell_w;
+            let text_x = x + (proj_width - text_w) / 2.0;
+            let text_y = (bar_h - cell_h) / 2.0;
+            let max_x = x + proj_width - cell_w * 0.5;
+            self.render_status_text(vertices, name, text_x.max(x + cell_w * 0.5), text_y, max_x, fg, no_bg);
+        }
+    }
+
+    fn build_tab_bar_vertices(&mut self, vertices: &mut Vec<Vertex>, viewport_w: f32, tab_titles: &[(String, bool, Option<usize>, bool, bool)], left_inset: f32, y_offset: f32) {
         let cell_w = self.atlas.cell_width;
         let cell_h = self.atlas.cell_height;
         let bar_h = (cell_h * 2.0).round();
         let tab_count = tab_titles.len();
 
-        Self::push_bg_quad(vertices, 0.0, 0.0, viewport_w, bar_h, self.tab_bar_bg);
+        Self::push_bg_quad(vertices, 0.0, y_offset, viewport_w, bar_h, self.tab_bar_bg);
 
         let max_tab_w = cell_w * 20.0;
         let full_available_w = viewport_w - left_inset;
@@ -835,7 +885,7 @@ impl Renderer {
             };
 
             if let Some(bg) = tab_bg {
-                Self::push_bg_quad(vertices, x, 0.0, tab_width, bar_h, bg);
+                Self::push_bg_quad(vertices, x, y_offset, tab_width, bar_h, bg);
             }
 
             if *is_active {
@@ -846,7 +896,7 @@ impl Renderer {
                 } else {
                     [0.7, 0.7, 0.7]
                 };
-                Self::push_bg_quad(vertices, x, bar_h - border_h, tab_width, border_h, border_color);
+                Self::push_bg_quad(vertices, x, y_offset + bar_h - border_h, tab_width, border_h, border_color);
             }
 
             let truncated: String;
@@ -872,13 +922,13 @@ impl Renderer {
 
             let text_w = label.chars().count() as f32 * cell_w;
             let text_x = x + (tab_width - text_w) / 2.0;
-            let text_y = (bar_h - cell_h) / 2.0;
+            let text_y = y_offset + (bar_h - cell_h) / 2.0;
             let max_x = x + tab_width - cell_w;
             self.render_status_text(vertices, &label, text_x.max(x + cell_w * 0.5), text_y, max_x, fg, no_bg);
 
             if *has_bell && !is_active {
                 let dot_x = x + tab_width - cell_w * 2.0;
-                let dot_y = (bar_h - cell_h) / 2.0;
+                let dot_y = y_offset + (bar_h - cell_h) / 2.0;
                 let dot_color = if let Some(bg) = tab_bg {
                     let lum = |c: [f32; 3]| 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
                     if (lum([1.0, 0.45, 0.1]) - lum(bg)).abs() < 0.25 { [1.0, 1.0, 1.0, 1.0] } else { [1.0, 0.45, 0.1, 1.0] }
@@ -892,7 +942,7 @@ impl Renderer {
         if show_version {
             let version_fg = [self.tab_bar_fg[0], self.tab_bar_fg[1], self.tab_bar_fg[2], 0.5];
             let version_x = viewport_w - version_padding + cell_w;
-            let version_y = (bar_h - cell_h) / 2.0;
+            let version_y = y_offset + (bar_h - cell_h) / 2.0;
             self.render_status_text(vertices, &version_label, version_x, version_y, viewport_w - cell_w * 0.5, version_fg, no_bg);
         }
     }

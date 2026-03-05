@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod input;
 mod install;
+mod ipc;
 mod keybindings;
 mod pane;
 mod renderer;
@@ -56,7 +57,7 @@ fn main() {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Kova — Fast GPU-accelerated terminal");
         println!();
-        println!("Usage: kova [OPTIONS]");
+        println!("Usage: kova [OPTIONS] [DIRECTORY]");
         println!();
         println!("Options:");
         println!("  --install             Register in app menu and 'Open With' for folders");
@@ -98,9 +99,28 @@ fn main() {
         log::error!("PANIC: {}", info);
     }));
 
+    // First non-option argument is the starting directory
+    let start_dir = args.iter().skip(1)
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.strip_prefix("file://").unwrap_or(s).to_string())
+        .filter(|s| std::path::Path::new(s).is_dir());
+
+    // Single-instance: if a directory was given, try sending it to existing instance
+    if let Some(ref dir) = start_dir {
+        if ipc::try_send(dir) {
+            log::info!("Sent directory to existing instance, exiting");
+            return;
+        }
+    }
+
+    // Start IPC listener for future instances
+    let ipc_rx = ipc::start_listener();
+
     let config = config::Config::load();
 
     let event_loop = EventLoop::new().expect("failed to create event loop");
-    let mut app = app::App::new(config, session_backup);
+    let mut app = app::App::new(config, session_backup, start_dir, ipc_rx);
     event_loop.run_app(&mut app).expect("event loop error");
+
+    ipc::cleanup();
 }

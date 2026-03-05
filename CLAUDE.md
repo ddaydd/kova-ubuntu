@@ -13,9 +13,11 @@ Fork Linux du terminal [Kova](https://github.com/ddaydd/kova) (originalement mac
 
 ## Architecture
 
-- Un arbre binaire de splits par tab
+- `Window → Vec<Project> → Vec<Tab> → SplitTree → Pane`
+- Un **Project** = dossier racine + ses tabs
 - Un PTY par terminal pane
 - Atlas de glyphes sur GPU
+- IPC socket Unix pour instance unique (`ipc.rs`)
 
 ## Prérequis
 
