@@ -18,6 +18,8 @@ pub struct SavedProject {
     pub root_dir: String,
     pub tabs: Vec<SavedTab>,
     pub active_tab: usize,
+    #[serde(default)]
+    pub custom_name: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -135,6 +137,7 @@ impl WindowSession {
                 root_dir: proj.root_dir.clone(),
                 tabs: snapshot_tabs(&proj.tabs),
                 active_tab: proj.active_tab,
+                custom_name: proj.custom_name.clone(),
             }
         }).collect();
         Self {
@@ -393,7 +396,9 @@ pub fn restore_session(session: Session, config: &Config) -> Option<Vec<Restored
                     frame: None,
                 };
                 if let Some((tabs, active_tab)) = restore_window_tabs(&fake_ws, config) {
-                    projects.push(Project::new_restored(sp.root_dir.clone(), tabs, active_tab));
+                    let mut proj = Project::new_restored(sp.root_dir.clone(), tabs, active_tab);
+                    proj.custom_name = sp.custom_name.clone();
+                    projects.push(proj);
                 }
             }
             if !projects.is_empty() {

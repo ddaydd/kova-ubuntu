@@ -334,6 +334,8 @@ impl Renderer {
         tab_bar_left_inset: f32,
         hidden_left: usize,
         hidden_right: usize,
+        drag_label: Option<(&str, f32, f32)>,
+        context_menu: Option<(f32, f32, bool, Option<u8>)>,
     ) {
         // Reset blink on cursor movement
         if let Some((term, _, _, _, _, _)) = panes.iter().find(|(_, _, _, focused, _, _)| *focused) {
@@ -397,7 +399,8 @@ impl Renderer {
         }
         let all_ready = !any_not_ready;
         let has_filter = filter.is_some();
-        if all_ready && !any_dirty && !any_sync_deferred && !blink_changed && !minute_changed && !has_filter && !show_help && help_hint_frames == 0 {
+        let is_dragging = drag_label.is_some();
+        if all_ready && !any_dirty && !any_sync_deferred && !blink_changed && !minute_changed && !has_filter && !show_help && help_hint_frames == 0 && !is_dragging {
             return;
         }
 
@@ -491,6 +494,27 @@ impl Renderer {
         // Help overlay
         if show_help {
             self.build_help_overlay_vertices(&mut all_vertices, viewport_w, viewport_h);
+        }
+
+        // Drag label floating near cursor
+        if let Some((label, mx, my)) = drag_label {
+            let cell_w = self.atlas.cell_width;
+            let cell_h = self.atlas.cell_height;
+            let text_w = label.chars().count() as f32 * cell_w + cell_w;
+            let pad = 4.0_f32;
+            let bg_w = text_w + pad * 2.0;
+            let bg_h = cell_h + pad * 2.0;
+            let bx = mx + 10.0;
+            let by = my + 10.0;
+            Self::push_bg_quad(&mut all_vertices, bx, by, bg_w, bg_h, [0.2, 0.2, 0.2]);
+            let fg = [1.0_f32, 1.0, 1.0, 1.0];
+            let no_bg = [0.0_f32, 0.0, 0.0, 0.0];
+            self.render_status_text(&mut all_vertices, label, bx + pad, by + pad, bx + bg_w, fg, no_bg);
+        }
+
+        // Context menu
+        if let Some((mx, my, has_sel, hovered)) = context_menu {
+            self.build_context_menu_vertices(&mut all_vertices, mx, my, has_sel, hovered);
         }
 
         // Startup help hint
@@ -828,7 +852,8 @@ impl Renderer {
         Self::push_bg_quad(vertices, 0.0, 0.0, viewport_w, bar_h, bar_bg);
 
         let max_proj_w = cell_w * 20.0;
-        let proj_width = (viewport_w / project_titles.len() as f32).min(max_proj_w);
+        // +1 for the "+" button slot
+        let proj_width = (viewport_w / (project_titles.len() + 1) as f32).min(max_proj_w);
 
         for (i, (name, is_active)) in project_titles.iter().enumerate() {
             let x = i as f32 * proj_width;
@@ -852,6 +877,13 @@ impl Renderer {
             let max_x = x + proj_width - cell_w * 0.5;
             self.render_status_text(vertices, name, text_x.max(x + cell_w * 0.5), text_y, max_x, fg, no_bg);
         }
+
+        // "+" button
+        let plus_x = project_titles.len() as f32 * proj_width;
+        let plus_fg = [self.tab_bar_fg[0], self.tab_bar_fg[1], self.tab_bar_fg[2], 0.5];
+        let plus_text_x = plus_x + (proj_width - cell_w) / 2.0;
+        let plus_text_y = (bar_h - cell_h) / 2.0;
+        self.render_status_text(vertices, "+", plus_text_x, plus_text_y, plus_x + proj_width, plus_fg, no_bg);
     }
 
     fn build_tab_bar_vertices(&mut self, vertices: &mut Vec<Vertex>, viewport_w: f32, tab_titles: &[(String, bool, Option<usize>, bool, bool)], left_inset: f32, y_offset: f32) {
@@ -864,12 +896,13 @@ impl Renderer {
 
         let max_tab_w = cell_w * 20.0;
         let full_available_w = viewport_w - left_inset;
-        let tab_width = (full_available_w / tab_count as f32).min(max_tab_w);
+        // +1 for the "+" button slot
+        let tab_width = (full_available_w / (tab_count + 1) as f32).min(max_tab_w);
 
         let version_label = format!("Kova v{}", env!("CARGO_PKG_VERSION"));
         let version_chars = version_label.chars().count() as f32;
         let version_padding = cell_w * (version_chars + 2.0);
-        let tabs_right_edge = left_inset + tab_count as f32 * tab_width;
+        let tabs_right_edge = left_inset + (tab_count + 1) as f32 * tab_width;
         let show_version = tabs_right_edge <= viewport_w - version_padding;
         let no_bg = [0.0, 0.0, 0.0, 0.0];
 
@@ -938,6 +971,13 @@ impl Renderer {
                 self.render_status_text(vertices, "●", dot_x, dot_y, x + tab_width, dot_color, no_bg);
             }
         }
+
+        // "+" button after last tab
+        let plus_x = left_inset + tab_count as f32 * tab_width;
+        let plus_fg = [self.tab_bar_fg[0], self.tab_bar_fg[1], self.tab_bar_fg[2], 0.5];
+        let plus_text_x = plus_x + (tab_width - cell_w) / 2.0;
+        let plus_text_y = y_offset + (bar_h - cell_h) / 2.0;
+        self.render_status_text(vertices, "+", plus_text_x, plus_text_y, plus_x + tab_width, plus_fg, no_bg);
 
         if show_version {
             let version_fg = [self.tab_bar_fg[0], self.tab_bar_fg[1], self.tab_bar_fg[2], 0.5];
@@ -1087,8 +1127,10 @@ impl Renderer {
             ("Super+Alt+Arrows",   "Navigate panes"),
             ("Super+Shift+Arrows", "Swap panes"),
             ("Super+Ctrl+Arrows",  "Resize panes"),
+            ("Super+Alt+Shift+L/R","Move tab to project"),
             ("Super+F",            "Search"),
             ("Super+C / Super+V",  "Copy / Paste"),
+            ("F2",                 "Save session"),
             ("Super+K",            "Clear scrollback"),
             ("Super+N",            "New window"),
             ("Super+Q",            "Close window"),
@@ -1120,6 +1162,49 @@ impl Renderer {
             self.render_status_text(vertices, key, start_x, y, start_x + col_key_w, key_fg, no_bg);
             self.render_status_text(vertices, desc, start_x + col_key_w, y, max_x, desc_fg, no_bg);
         }
+    }
+
+    fn build_context_menu_vertices(&mut self, vertices: &mut Vec<Vertex>, x: f32, y: f32, has_selection: bool, hovered: Option<u8>) {
+        let cell_w = self.atlas.cell_width;
+        let cell_h = self.atlas.cell_height;
+        let item_w = cell_w * 12.0;
+        let item_h = cell_h * 1.8;
+        let menu_h = item_h * 2.0;
+        let pad = 4.0_f32;
+        let no_bg = [0.0, 0.0, 0.0, 0.0];
+
+        // Menu background
+        Self::push_bg_quad(vertices, x, y, item_w, menu_h, [0.15, 0.15, 0.18]);
+        // Border
+        Self::push_bg_quad(vertices, x, y, item_w, 1.0, [0.4, 0.4, 0.4]);
+        Self::push_bg_quad(vertices, x, y + menu_h - 1.0, item_w, 1.0, [0.4, 0.4, 0.4]);
+        Self::push_bg_quad(vertices, x, y, 1.0, menu_h, [0.4, 0.4, 0.4]);
+        Self::push_bg_quad(vertices, x + item_w - 1.0, y, 1.0, menu_h, [0.4, 0.4, 0.4]);
+
+        // Item 0: Copy
+        let copy_y = y;
+        if hovered == Some(0) && has_selection {
+            Self::push_bg_quad(vertices, x + 1.0, copy_y + 1.0, item_w - 2.0, item_h - 1.0, [0.3, 0.3, 0.35]);
+        }
+        let copy_fg = if has_selection {
+            [1.0, 1.0, 1.0, 1.0]
+        } else {
+            [0.5, 0.5, 0.5, 1.0]
+        };
+        let text_y = copy_y + (item_h - cell_h) / 2.0;
+        self.render_status_text(vertices, "Copy", x + pad, text_y, x + item_w, copy_fg, no_bg);
+
+        // Separator
+        Self::push_bg_quad(vertices, x + 4.0, y + item_h, item_w - 8.0, 1.0, [0.35, 0.35, 0.38]);
+
+        // Item 1: Paste
+        let paste_y = y + item_h;
+        if hovered == Some(1) {
+            Self::push_bg_quad(vertices, x + 1.0, paste_y, item_w - 2.0, item_h - 1.0, [0.3, 0.3, 0.35]);
+        }
+        let paste_fg = [1.0, 1.0, 1.0, 1.0];
+        let text_y = paste_y + (item_h - cell_h) / 2.0;
+        self.render_status_text(vertices, "Paste", x + pad, text_y, x + item_w, paste_fg, no_bg);
     }
 
     fn build_help_hint_vertices(&mut self, vertices: &mut Vec<Vertex>, viewport_w: f32, viewport_h: f32, frames_left: u32) {

@@ -1,5 +1,28 @@
 # Kova Linux — Notes de version
 
+## 2026-03-06
+
+### Vue "All terminals" (Super+0)
+- Nouveau mode grille affichant tous les terminaux de tous les projets
+- Entrée "All" dans la project bar (premier slot)
+- Clic sur un pane = switch au projet/tab correspondant et quitte le mode All
+- Tab bar masquée en mode All
+
+### Rename project (clic droit)
+- Clic droit sur un projet dans la project bar = renommer
+- `custom_name` sauvegardé/restauré avec la session
+- Si le nom est vidé, retour au nom par défaut (dernier composant du path)
+
+### Selection de texte a la souris
+- Clic gauche dans un pane = debut de selection
+- Drag = extension de la selection (surlignage temps reel)
+- Relachement = fin de selection, texte reste selectionne
+
+### Menu contextuel (clic droit dans un pane)
+- Copy / Paste via menu contextuel
+- Copy grise si pas de selection
+- Highlight au survol des items
+
 ## 2026-03-05
 
 ### F11 fullscreen + F1 help update

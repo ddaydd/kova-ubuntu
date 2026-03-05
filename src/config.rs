@@ -236,6 +236,8 @@ pub struct KeysConfig {
     pub rename_pane: String,
     pub detach_tab: String,
     pub merge_window: String,
+    pub move_tab_to_next_project: String,
+    pub move_tab_to_prev_project: String,
     pub switch_tab_1: String,
     pub switch_tab_2: String,
     pub switch_tab_3: String,
@@ -260,6 +262,7 @@ pub struct KeysConfig {
     pub toggle_help: String,
     pub save_session: String,
     pub toggle_fullscreen: String,
+    pub show_all_terminals: String,
     pub terminal: TerminalKeysConfig,
 }
 
@@ -285,6 +288,8 @@ impl Default for KeysConfig {
             rename_pane: "cmd+option+r".into(),
             detach_tab: "cmd+shift+t".into(),
             merge_window: "cmd+shift+m".into(),
+            move_tab_to_next_project: "cmd+option+shift+right".into(),
+            move_tab_to_prev_project: "cmd+option+shift+left".into(),
             switch_tab_1: "cmd+1".into(),
             switch_tab_2: "cmd+2".into(),
             switch_tab_3: "cmd+3".into(),
@@ -307,8 +312,9 @@ impl Default for KeysConfig {
             resize_up: "cmd+ctrl+up".into(),
             resize_down: "cmd+ctrl+down".into(),
             toggle_help: "f1".into(),
-            save_session: "cmd+s".into(),
+            save_session: "f2".into(),
             toggle_fullscreen: "f11".into(),
+            show_all_terminals: "cmd+0".into(),
             terminal: TerminalKeysConfig::default(),
         }
     }

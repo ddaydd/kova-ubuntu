@@ -75,6 +75,7 @@ pub struct Project {
     pub root_dir: String,
     pub tabs: Vec<Tab>,
     pub active_tab: usize,
+    pub custom_name: Option<String>,
 }
 
 impl Project {
@@ -84,6 +85,7 @@ impl Project {
             root_dir,
             tabs: vec![tab],
             active_tab: 0,
+            custom_name: None,
         }
     }
 
@@ -93,11 +95,15 @@ impl Project {
             root_dir,
             tabs,
             active_tab,
+            custom_name: None,
         }
     }
 
-    /// Short display name: last path component.
+    /// Short display name: custom name if set, otherwise last path component.
     pub fn name(&self) -> String {
+        if let Some(ref name) = self.custom_name {
+            return name.clone();
+        }
         std::path::Path::new(&self.root_dir)
             .file_name()
             .map(|f| f.to_string_lossy().to_string())

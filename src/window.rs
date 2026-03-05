@@ -24,6 +24,50 @@ struct RenameTabState {
     input: String,
 }
 
+struct RenameProjectState {
+    project_idx: usize,
+    input: String,
+}
+
+/// State for mouse text selection.
+struct TextSelectState {
+    /// Pane being selected in.
+    pane_id: PaneId,
+    /// Viewport of the pane (for coordinate conversion).
+    viewport: PaneViewport,
+}
+
+/// Context menu items.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ContextMenuItem {
+    Copy,
+    Paste,
+}
+
+/// Context menu state (shown on right-click in pane area).
+struct ContextMenu {
+    /// Logical position of menu.
+    x: f32,
+    y: f32,
+    /// Which item is hovered.
+    hovered: Option<ContextMenuItem>,
+    /// Whether there is a selection (enables Copy).
+    has_selection: bool,
+}
+
+/// State for dragging a tab between projects.
+struct DragState {
+    /// Project index the tab is being dragged from.
+    src_project: usize,
+    /// Tab index being dragged.
+    src_tab: usize,
+    /// Whether we've moved enough to consider it a drag (vs a click).
+    dragging: bool,
+    /// Mouse position at press (logical pixels).
+    start_x: f64,
+    start_y: f64,
+}
+
 pub struct KovaWindow {
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
@@ -38,17 +82,26 @@ pub struct KovaWindow {
     last_scale: f64,
     filter: Option<FilterState>,
     rename_tab: Option<RenameTabState>,
+    rename_project: Option<RenameProjectState>,
     show_help: bool,
     modifiers: winit::event::Modifiers,
     closing: bool,
     /// Current mouse position in physical pixels.
     mouse_x: f64,
     mouse_y: f64,
+    /// Tab drag & drop state.
+    drag: Option<DragState>,
     /// Git branch poll counter (ticks since last poll).
     git_poll_counter: u32,
     git_poll_interval: u32,
     /// Frames remaining to show the "F1 for help" hint at startup.
     help_hint_frames: u32,
+    /// Show all terminals from all projects in a grid.
+    show_all: bool,
+    /// Mouse text selection state.
+    text_select: Option<TextSelectState>,
+    /// Context menu (right-click).
+    context_menu: Option<ContextMenu>,
 }
 
 impl KovaWindow {
@@ -134,14 +187,19 @@ impl KovaWindow {
             last_scale: scale,
             filter: None,
             rename_tab: None,
+            rename_project: None,
             show_help: false,
             modifiers: Default::default(),
             closing: false,
             mouse_x: 0.0,
             mouse_y: 0.0,
+            drag: None,
             git_poll_counter: 0,
             git_poll_interval: fps * 2,
             help_hint_frames: fps * 3,
+            show_all: false,
+            text_select: None,
+            context_menu: None,
         };
 
         // Initial resize + first render, then show window
@@ -178,35 +236,58 @@ impl KovaWindow {
         self.project().active_tab
     }
 
-    /// Add a new project or focus existing one for the given directory.
+    /// Open a directory as a new tab in the active project (orphan tab).
+    /// The user can then move it to another project with Super+Alt+Shift+Left/Right.
     pub fn open_project(&mut self, dir: &str) {
-        // Check if project already exists
-        for (i, proj) in self.projects.iter().enumerate() {
-            if proj.root_dir == dir {
-                self.active_project = i;
-                // Add a new tab in the existing project
-                match crate::pane::Tab::new_with_cwd(&self.config, Some(dir)) {
-                    Ok(tab) => {
-                        let proj = &mut self.projects[i];
-                        proj.tabs.push(tab);
-                        proj.active_tab = proj.tabs.len() - 1;
-                        self.resize_all_panes();
-                    }
-                    Err(e) => log::error!("Failed to create tab: {}", e),
-                }
-                return;
-            }
-        }
-        // New project
         match crate::pane::Tab::new_with_cwd(&self.config, Some(dir)) {
             Ok(tab) => {
-                let proj = Project::new(dir.to_string(), tab);
+                let proj = self.project_mut();
+                proj.tabs.push(tab);
+                proj.active_tab = proj.tabs.len() - 1;
+                self.resize_all_panes();
+            }
+            Err(e) => log::error!("Failed to create tab for {}: {}", dir, e),
+        }
+    }
+
+    /// Create a new empty project (shell in $HOME).
+    fn do_new_project(&mut self) {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+        match crate::pane::Tab::new_with_cwd(&self.config, Some(&home)) {
+            Ok(tab) => {
+                let proj = Project::new(home, tab);
                 self.projects.push(proj);
                 self.active_project = self.projects.len() - 1;
                 self.resize_all_panes();
             }
             Err(e) => log::error!("Failed to create project: {}", e),
         }
+    }
+
+    /// Move the active tab from the current project to the next/previous project.
+    fn do_move_tab_to_project(&mut self, delta: i32) {
+        if self.projects.len() < 2 {
+            return;
+        }
+        let src = self.active_project;
+        let dst = ((src as i32 + delta).rem_euclid(self.projects.len() as i32)) as usize;
+        if src == dst {
+            return;
+        }
+        let src_proj = &mut self.projects[src];
+        if src_proj.tabs.len() <= 1 {
+            // Don't leave an empty project — move the whole project instead
+            return;
+        }
+        let tab_idx = src_proj.active_tab;
+        let tab = src_proj.tabs.remove(tab_idx);
+        src_proj.active_tab = src_proj.active_tab.min(src_proj.tabs.len() - 1);
+
+        let dst_proj = &mut self.projects[dst];
+        dst_proj.tabs.push(tab);
+        dst_proj.active_tab = dst_proj.tabs.len() - 1;
+        self.active_project = dst;
+        self.resize_all_panes();
     }
 
     pub fn session_data(&self) -> WindowSession {
@@ -281,14 +362,9 @@ impl KovaWindow {
     }
 
     fn render(&mut self) {
-        let proj = match self.projects.get(self.active_project) {
-            Some(p) => p,
-            None => return,
-        };
-        let tab = match proj.tabs.get(proj.active_tab) {
-            Some(t) => t,
-            None => return,
-        };
+        if self.projects.is_empty() {
+            return;
+        }
 
         let size = self.window.inner_size();
         let viewport_w = size.width as f32;
@@ -299,49 +375,108 @@ impl KovaWindow {
         }
 
         let (_, cell_h) = self.renderer.cell_size();
-        let project_bar_h = if self.projects.len() > 1 { (cell_h * 1.5).round() } else { 0.0 };
-        let tab_bar_h = if proj.tabs.len() > 1 { (cell_h * 2.0).round() } else { 0.0 };
+        let project_bar_h = (cell_h * 1.5).round();
+        let tab_bar_h = if self.show_all { 0.0 } else { (cell_h * 2.0).round() };
         let global_bar_h = cell_h;
         let bars_h = project_bar_h + tab_bar_h;
         let pane_area_y = bars_h;
         let pane_area_h = viewport_h - bars_h - global_bar_h;
 
-        let total_vp = PaneViewport {
-            x: 0.0,
-            y: pane_area_y,
-            width: viewport_w,
-            height: pane_area_h,
-        };
-
-        // Collect pane data for rendering
-        let mut panes = Vec::new();
-        tab.tree.for_each_pane_with_viewport(total_vp, &mut |pane, vp| {
-            panes.push((
-                pane.terminal.clone(),
-                vp,
-                pane.is_ready(),
-                pane.id == tab.focused_pane,
-                pane.id,
-                pane.custom_title.clone(),
-            ));
-        });
-
-        // Collect separators
-        let mut separators = Vec::new();
-        tab.tree.collect_separators(total_vp, &mut separators);
-
-        // Project titles
-        let project_titles: Vec<(String, bool)> = if self.projects.len() > 1 {
-            self.projects.iter().enumerate()
-                .map(|(i, p)| (p.name(), i == self.active_project))
-                .collect()
+        // Collect tabs: all projects in show_all mode, or just active project
+        let all_tabs: Vec<(&Tab, bool)> = if self.show_all {
+            self.projects.iter().flat_map(|p| {
+                p.tabs.iter().map(|t| (t, false))
+            }).collect()
         } else {
-            Vec::new()
+            let proj = &self.projects[self.active_project];
+            proj.tabs.iter().enumerate().map(|(i, t)| {
+                (t, i == proj.active_tab)
+            }).collect()
         };
 
-        // Tab titles
-        let active_tab_idx = proj.active_tab;
-        let tab_titles: Vec<(String, bool, Option<usize>, bool, bool)> = if proj.tabs.len() > 1 {
+        if all_tabs.is_empty() {
+            return;
+        }
+
+        let tab_count = all_tabs.len();
+
+        // Grid layout (Termix algorithm)
+        let (grid_cols, grid_rows) = if tab_count <= 1 {
+            (1, 1)
+        } else {
+            let ratio = viewport_w / pane_area_h;
+            let cols = (((tab_count as f32) * ratio).sqrt()).round() as usize;
+            let cols = cols.max(1).min(tab_count);
+            let rows = (tab_count + cols - 1) / cols;
+            (cols, rows)
+        };
+
+        let gap = 2.0_f32;
+        let cell_w_grid = (viewport_w - (grid_cols as f32 - 1.0) * gap) / grid_cols as f32;
+        let cell_h_grid = (pane_area_h - (grid_rows as f32 - 1.0) * gap) / grid_rows as f32;
+
+        let mut panes = Vec::new();
+        let mut separators = Vec::new();
+
+        for (tab_i, (tab, is_active_tab)) in all_tabs.iter().enumerate() {
+            let col = tab_i % grid_cols;
+            let row = tab_i / grid_cols;
+            let cell_x = col as f32 * (cell_w_grid + gap);
+            let cell_y = pane_area_y + row as f32 * (cell_h_grid + gap);
+
+            let tab_vp = PaneViewport {
+                x: cell_x,
+                y: cell_y,
+                width: cell_w_grid,
+                height: cell_h_grid,
+            };
+
+            tab.tree.for_each_pane_with_viewport(tab_vp, &mut |pane, vp| {
+                let is_focused = *is_active_tab && pane.id == tab.focused_pane;
+                panes.push((
+                    pane.terminal.clone(),
+                    vp,
+                    pane.is_ready(),
+                    is_focused,
+                    pane.id,
+                    pane.custom_title.clone(),
+                ));
+            });
+
+            tab.tree.collect_separators(tab_vp, &mut separators);
+        }
+
+        // Project titles: prepend "All" entry when in show_all mode
+        let project_titles: Vec<(String, bool)> = if self.show_all {
+            let mut titles = vec![("All".to_string(), true)];
+            titles.extend(self.projects.iter().enumerate().map(|(i, p)| {
+                let name = if self.rename_project.as_ref().is_some_and(|r| r.project_idx == i) {
+                    format!("{}|", self.rename_project.as_ref().unwrap().input)
+                } else {
+                    p.name()
+                };
+                (name, false)
+            }));
+            titles
+        } else {
+            self.projects.iter().enumerate()
+                .map(|(i, p)| {
+                    let name = if self.rename_project.as_ref().is_some_and(|r| r.project_idx == i) {
+                        format!("{}|", self.rename_project.as_ref().unwrap().input)
+                    } else {
+                        p.name()
+                    };
+                    (name, i == self.active_project)
+                })
+                .collect()
+        };
+
+        // Tab titles (hidden in show_all mode)
+        let tab_titles: Vec<(String, bool, Option<usize>, bool, bool)> = if self.show_all {
+            Vec::new()
+        } else {
+            let proj = &self.projects[self.active_project];
+            let active_tab_idx = proj.active_tab;
             proj.tabs
                 .iter()
                 .enumerate()
@@ -355,13 +490,31 @@ impl KovaWindow {
                     (title, i == active_tab_idx, t.color, is_renaming, t.has_bell)
                 })
                 .collect()
-        } else {
-            Vec::new()
         };
 
         let filter_data = self.filter.as_ref().map(|f| FilterRenderData {
             query: f.query.clone(),
             matches: f.matches.clone(),
+        });
+
+        // Drag label: tab title floating near cursor
+        let drag_label: Option<(String, f32, f32)> = self.drag.as_ref().and_then(|d| {
+            if !d.dragging { return None; }
+            let title = self.projects.get(d.src_project)
+                .and_then(|p| p.tabs.get(d.src_tab))
+                .map(|t| t.title())?;
+            let scale = self.window.scale_factor() as f32;
+            Some((title, self.mouse_x as f32 / scale, self.mouse_y as f32 / scale))
+        });
+        let drag_ref = drag_label.as_ref().map(|(s, x, y)| (s.as_str(), *x, *y));
+
+        let ctx_menu = self.context_menu.as_ref().map(|m| {
+            let hovered = match m.hovered {
+                Some(ContextMenuItem::Copy) => Some(0u8),
+                Some(ContextMenuItem::Paste) => Some(1u8),
+                None => None,
+            };
+            (m.x, m.y, m.has_selection, hovered)
         });
 
         self.renderer.render_panes(
@@ -378,6 +531,8 @@ impl KovaWindow {
             0.0,
             0,
             0,
+            drag_ref,
+            ctx_menu,
         );
     }
 
@@ -422,6 +577,35 @@ impl KovaWindow {
                     match &event.logical_key {
                         Key::Named(NamedKey::Escape) | Key::Named(NamedKey::F1) => {
                             self.show_help = false;
+                        }
+                        _ => {}
+                    }
+                    return WindowAction::None;
+                }
+
+                // Handle rename project mode
+                if let Some(ref mut rename) = self.rename_project {
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Enter) => {
+                            let idx = rename.project_idx;
+                            let new_name = rename.input.clone();
+                            if let Some(proj) = self.projects.get_mut(idx) {
+                                proj.custom_name = if new_name.is_empty() {
+                                    None
+                                } else {
+                                    Some(new_name)
+                                };
+                            }
+                            self.rename_project = None;
+                        }
+                        Key::Named(NamedKey::Escape) => {
+                            self.rename_project = None;
+                        }
+                        Key::Named(NamedKey::Backspace) => {
+                            rename.input.pop();
+                        }
+                        Key::Character(s) => {
+                            rename.input.push_str(s);
                         }
                         _ => {}
                     }
@@ -543,6 +727,12 @@ impl KovaWindow {
                         Action::RenamePane => {} // TODO
                         Action::DetachTab => {}  // TODO
                         Action::MergeWindow => {} // TODO
+                        Action::MoveTabToNextProject => self.do_move_tab_to_project(1),
+                        Action::MoveTabToPrevProject => self.do_move_tab_to_project(-1),
+                        Action::ShowAllTerminals => {
+                            self.show_all = !self.show_all;
+                            self.resize_all_panes();
+                        }
                         Action::Copy => {
                             if let Some(pane) = self.focused_pane() {
                                 let mut term = pane.terminal.write();
@@ -594,6 +784,59 @@ impl KovaWindow {
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse_x = position.x;
                 self.mouse_y = position.y;
+                // Check drag threshold (5 logical pixels)
+                if let Some(ref mut drag) = self.drag {
+                    if !drag.dragging {
+                        let scale = self.window.scale_factor();
+                        let dx = position.x / scale - drag.start_x;
+                        let dy = position.y / scale - drag.start_y;
+                        if dx * dx + dy * dy > 25.0 {
+                            drag.dragging = true;
+                        }
+                    }
+                }
+                // Update text selection during drag
+                if let Some(ref sel) = self.text_select {
+                    let scale = self.window.scale_factor();
+                    let x = position.x as f32 / scale as f32;
+                    let y = position.y as f32 / scale as f32;
+                    let pane_id = sel.pane_id;
+                    let vp = sel.viewport;
+                    // Find the pane by id to update selection
+                    for proj in &self.projects {
+                        for tab in &proj.tabs {
+                            if let Some(pane) = tab.tree.pane(pane_id) {
+                                let (col, abs_line) = self.mouse_to_grid(x, y, &vp, pane);
+                                let mut term = pane.terminal.write();
+                                if let Some(ref mut selection) = term.selection {
+                                    selection.end = crate::terminal::GridPos { line: abs_line, col };
+                                }
+                                return WindowAction::None;
+                            }
+                        }
+                    }
+                }
+                // Update context menu hover
+                if let Some(ref mut menu) = self.context_menu {
+                    let scale = self.window.scale_factor();
+                    let mx = self.mouse_x as f32 / scale as f32;
+                    let my = self.mouse_y as f32 / scale as f32;
+                    let (cell_w, cell_h) = self.renderer.cell_size();
+                    let item_w = cell_w * 12.0;
+                    let item_h = cell_h * 1.8;
+                    if mx >= menu.x && mx < menu.x + item_w {
+                        let rel_y = my - menu.y;
+                        if rel_y >= 0.0 && rel_y < item_h {
+                            menu.hovered = if menu.has_selection { Some(ContextMenuItem::Copy) } else { None };
+                        } else if rel_y >= item_h && rel_y < item_h * 2.0 {
+                            menu.hovered = Some(ContextMenuItem::Paste);
+                        } else {
+                            menu.hovered = None;
+                        }
+                    } else {
+                        menu.hovered = None;
+                    }
+                }
             }
 
             WindowEvent::MouseInput {
@@ -605,30 +848,234 @@ impl KovaWindow {
                 let x = self.mouse_x / scale;
                 let y = self.mouse_y / scale;
                 let (cell_w, cell_h) = self.renderer.cell_size();
-                let project_bar_h = if self.projects.len() > 1 { (cell_h * 1.5).round() } else { 0.0 };
-                let tab_bar_h = if self.project().tabs.len() > 1 { (cell_h * 2.0).round() } else { 0.0 };
 
-                if self.projects.len() > 1 && (y as f32) < project_bar_h {
-                    // Click in project bar — switch project
+                // Check if clicking inside context menu
+                if let Some(menu) = &self.context_menu {
+                    let mx = x as f32;
+                    let my = y as f32;
+                    let item_w = cell_w * 12.0;
+                    let item_h = cell_h * 1.8;
+                    let mut action = None;
+                    if mx >= menu.x && mx < menu.x + item_w {
+                        let rel_y = my - menu.y;
+                        if rel_y >= 0.0 && rel_y < item_h && menu.has_selection {
+                            action = Some(ContextMenuItem::Copy);
+                        } else if rel_y >= item_h && rel_y < item_h * 2.0 {
+                            action = Some(ContextMenuItem::Paste);
+                        }
+                    }
+                    self.do_context_action(action);
+                    return WindowAction::None;
+                }
+
+                let project_bar_h = (cell_h * 1.5).round();
+                let tab_bar_h = (cell_h * 2.0).round();
+                let viewport_h = self.surface_config.height as f32 / scale as f32;
+
+                if (y as f32) < project_bar_h {
+                    // Click in project bar
                     let viewport_w = self.surface_config.width as f64 / scale;
                     let max_proj_w = cell_w as f64 * 20.0;
-                    let proj_width = (viewport_w / self.projects.len() as f64).min(max_proj_w);
-                    let clicked = (x / proj_width) as usize;
-                    if clicked < self.projects.len() {
-                        self.active_project = clicked;
-                        self.resize_all_panes();
+                    if self.show_all {
+                        // In show_all mode: slot 0 = "All" (already active), slots 1..N = projects, last = "+"
+                        let slot_count = 1 + self.projects.len() + 1; // "All" + projects + "+"
+                        let proj_width = (viewport_w / slot_count as f64).min(max_proj_w);
+                        let clicked = (x / proj_width) as usize;
+                        if clicked == 0 {
+                            // Already on "All", do nothing
+                        } else if clicked <= self.projects.len() {
+                            // Switch to specific project
+                            self.show_all = false;
+                            self.active_project = clicked - 1;
+                            self.resize_all_panes();
+                        } else {
+                            // "+" button
+                            self.show_all = false;
+                            self.do_new_project();
+                        }
+                    } else {
+                        let proj_count = self.projects.len();
+                        let proj_width = (viewport_w / (proj_count + 1) as f64).min(max_proj_w);
+                        let plus_x = proj_count as f64 * proj_width;
+                        if x >= plus_x && x < plus_x + proj_width {
+                            self.do_new_project();
+                        } else {
+                            let clicked = (x / proj_width) as usize;
+                            if clicked < proj_count {
+                                self.active_project = clicked;
+                                self.resize_all_panes();
+                            }
+                        }
                     }
-                } else if self.project().tabs.len() > 1 && (y as f32) < project_bar_h + tab_bar_h {
-                    // Click in tab bar — switch tab
+                } else if !self.show_all && (y as f32) < project_bar_h + tab_bar_h {
+                    // Click in tab bar (not visible in show_all mode)
                     let viewport_w = self.surface_config.width as f64 / scale;
                     let max_tab_w = cell_w as f64 * 20.0;
-                    let tabs = &self.project().tabs;
-                    let tab_width = (viewport_w / tabs.len() as f64).min(max_tab_w);
-                    let clicked_tab = (x / tab_width) as usize;
-                    if clicked_tab < tabs.len() {
-                        self.project_mut().active_tab = clicked_tab;
-                        self.project_mut().tabs[clicked_tab].clear_bell();
-                        self.resize_all_panes();
+                    let tab_count = self.project().tabs.len();
+                    let tab_width = (viewport_w / (tab_count + 1) as f64).min(max_tab_w);
+                    let plus_x = tab_count as f64 * tab_width;
+                    if x >= plus_x && x < plus_x + tab_width {
+                        self.do_new_tab();
+                    } else {
+                        let clicked_tab = (x / tab_width) as usize;
+                        if clicked_tab < tab_count {
+                            // Start potential drag
+                            self.drag = Some(DragState {
+                                src_project: self.active_project,
+                                src_tab: clicked_tab,
+                                dragging: false,
+                                start_x: x,
+                                start_y: y,
+                            });
+                            // Switch to tab immediately
+                            self.project_mut().active_tab = clicked_tab;
+                            self.project_mut().tabs[clicked_tab].clear_bell();
+                            self.resize_all_panes();
+                        }
+                    }
+                } else {
+                    // Click in pane area — dismiss context menu, start text selection
+                    self.context_menu = None;
+                    if let Some((pane, vp)) = self.pane_at(x as f32, y as f32) {
+                        let pane_id = pane.id;
+                        let (col, abs_line) = self.mouse_to_grid(x as f32, y as f32, &vp, pane);
+                        // Start text selection
+                        let anchor = crate::terminal::GridPos { line: abs_line, col };
+                        pane.terminal.write().selection = Some(crate::terminal::Selection {
+                            anchor,
+                            end: anchor,
+                        });
+                        self.text_select = Some(TextSelectState { pane_id, viewport: vp });
+                    }
+                }
+            }
+
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => {
+                // End text selection
+                self.text_select = None;
+
+                if let Some(drag) = self.drag.take() {
+                    if drag.dragging {
+                        // Drop: check if mouse is over the project bar
+                        let scale = self.window.scale_factor();
+                        let x = self.mouse_x / scale;
+                        let y = self.mouse_y / scale;
+                        let (cell_w, cell_h) = self.renderer.cell_size();
+                        let project_bar_h = (cell_h * 1.5).round();
+
+                        if (y as f32) < project_bar_h {
+                            let viewport_w = self.surface_config.width as f64 / scale;
+                            let max_proj_w = cell_w as f64 * 20.0;
+                            let proj_count = self.projects.len();
+                            let proj_width = (viewport_w / (proj_count + 1) as f64).min(max_proj_w);
+                            let target_proj = (x / proj_width) as usize;
+
+                            if target_proj < proj_count && target_proj != drag.src_project {
+                                // Move tab from src to target project
+                                let src = &mut self.projects[drag.src_project];
+                                let tab = src.tabs.remove(drag.src_tab);
+                                src.active_tab = src.active_tab.min(src.tabs.len().saturating_sub(1));
+
+                                // If source project is now empty, remove it
+                                if src.tabs.is_empty() {
+                                    self.projects.remove(drag.src_project);
+                                    // Adjust target index if source was before target
+                                    let adjusted_target = if drag.src_project < target_proj {
+                                        target_proj - 1
+                                    } else {
+                                        target_proj
+                                    };
+                                    let dst = &mut self.projects[adjusted_target];
+                                    dst.tabs.push(tab);
+                                    dst.active_tab = dst.tabs.len() - 1;
+                                    self.active_project = adjusted_target;
+                                } else {
+                                    let dst = &mut self.projects[target_proj];
+                                    dst.tabs.push(tab);
+                                    dst.active_tab = dst.tabs.len() - 1;
+                                    self.active_project = target_proj;
+                                }
+                                self.resize_all_panes();
+                            }
+                        }
+                    }
+                }
+            }
+
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => {
+                // Right-click on project bar → rename project
+                let scale = self.window.scale_factor();
+                let x = self.mouse_x / scale;
+                let y = self.mouse_y / scale;
+                let (cell_w, cell_h) = self.renderer.cell_size();
+                let project_bar_h = (cell_h * 1.5).round();
+
+                if (y as f32) < project_bar_h {
+                    // Right-click on project bar → rename project
+                    let viewport_w = self.surface_config.width as f64 / scale;
+                    let max_proj_w = cell_w as f64 * 20.0;
+                    if self.show_all {
+                        let slot_count = 1 + self.projects.len() + 1;
+                        let proj_width = (viewport_w / slot_count as f64).min(max_proj_w);
+                        let clicked = (x / proj_width) as usize;
+                        // slot 0 = "All" (not renamable), 1..N = projects
+                        if clicked >= 1 && clicked <= self.projects.len() {
+                            let idx = clicked - 1;
+                            let current = self.projects[idx].name();
+                            self.rename_project = Some(RenameProjectState {
+                                project_idx: idx,
+                                input: current,
+                            });
+                        }
+                    } else {
+                        let proj_count = self.projects.len();
+                        let proj_width = (viewport_w / (proj_count + 1) as f64).min(max_proj_w);
+                        let clicked = (x / proj_width) as usize;
+                        if clicked < proj_count {
+                            let current = self.projects[clicked].name();
+                            self.rename_project = Some(RenameProjectState {
+                                project_idx: clicked,
+                                input: current,
+                            });
+                        }
+                    }
+                } else {
+                    // Right-click in pane area → context menu
+                    if let Some(menu) = &self.context_menu {
+                        // If menu is already open, check if we clicked an item
+                        let mx = x as f32;
+                        let my = y as f32;
+                        let (cw, ch) = self.renderer.cell_size();
+                        let item_w = cw * 12.0;
+                        let item_h = ch * 1.8;
+                        let mut action = None;
+                        if mx >= menu.x && mx < menu.x + item_w {
+                            let rel_y = my - menu.y;
+                            if rel_y >= 0.0 && rel_y < item_h && menu.has_selection {
+                                action = Some(ContextMenuItem::Copy);
+                            } else if rel_y >= item_h && rel_y < item_h * 2.0 {
+                                action = Some(ContextMenuItem::Paste);
+                            }
+                        }
+                        self.do_context_action(action);
+                    } else {
+                        let has_sel = self.focused_pane()
+                            .map(|p| p.terminal.read().selection.is_some())
+                            .unwrap_or(false);
+                        self.context_menu = Some(ContextMenu {
+                            x: x as f32,
+                            y: y as f32,
+                            hovered: None,
+                            has_selection: has_sel,
+                        });
                     }
                 }
             }
@@ -647,7 +1094,7 @@ impl KovaWindow {
                     };
                     if lines != 0 {
                         let mut term = pane.terminal.write();
-                        term.scroll(-lines);
+                        term.scroll(lines);
                     }
                 }
             }
@@ -668,6 +1115,108 @@ impl KovaWindow {
         tab.tree.pane(tab.focused_pane)
     }
 
+    /// Hit-test mouse position (logical coords) against all visible panes.
+    /// Returns the pane and its viewport.
+    fn pane_at(&self, x: f32, y: f32) -> Option<(&Pane, PaneViewport)> {
+        let size = self.window.inner_size();
+        let scale = self.window.scale_factor() as f32;
+        let viewport_w = size.width as f32 / scale;
+        let viewport_h = size.height as f32 / scale;
+        let (_, cell_h) = self.renderer.cell_size();
+        let project_bar_h = (cell_h * 1.5).round();
+        let tab_bar_h = if self.show_all { 0.0 } else { (cell_h * 2.0).round() };
+        let global_bar_h = cell_h;
+        let bars_h = project_bar_h + tab_bar_h;
+        let pane_area_h = viewport_h - bars_h - global_bar_h;
+        let local_y = y - bars_h;
+        if local_y < 0.0 { return None; }
+
+        let tabs: Vec<&Tab> = if self.show_all {
+            self.projects.iter().flat_map(|p| p.tabs.iter()).collect()
+        } else {
+            let proj = self.projects.get(self.active_project)?;
+            proj.tabs.iter().collect()
+        };
+        let tab_count = tabs.len();
+        let (grid_cols, grid_rows) = if tab_count <= 1 {
+            (1usize, 1usize)
+        } else {
+            let ratio = viewport_w / pane_area_h;
+            let cols = (((tab_count as f32) * ratio).sqrt()).round() as usize;
+            let cols = cols.max(1).min(tab_count);
+            let rows = (tab_count + cols - 1) / cols;
+            (cols, rows)
+        };
+        let gap = 2.0_f32;
+        let cell_w_grid = (viewport_w - (grid_cols as f32 - 1.0) * gap) / grid_cols as f32;
+        let cell_h_grid = (pane_area_h - (grid_rows as f32 - 1.0) * gap) / grid_rows as f32;
+
+        for (tab_i, tab) in tabs.iter().enumerate() {
+            let col = tab_i % grid_cols;
+            let row = tab_i / grid_cols;
+            let cx = col as f32 * (cell_w_grid + gap);
+            let cy = row as f32 * (cell_h_grid + gap);
+            let tab_vp = PaneViewport { x: cx, y: cy, width: cell_w_grid, height: cell_h_grid };
+            if let Some((pane, vp)) = tab.tree.hit_test(x, local_y, tab_vp) {
+                return Some((pane, vp));
+            }
+        }
+        None
+    }
+
+    /// Convert logical mouse position to terminal grid (col, abs_line) for a pane.
+    fn mouse_to_grid(&self, x: f32, y: f32, vp: &PaneViewport, pane: &Pane) -> (u16, usize) {
+        let (cell_w, cell_h) = self.renderer.cell_size();
+        let bars_h = {
+            let project_bar_h = (cell_h * 1.5).round();
+            let tab_bar_h = if self.show_all { 0.0 } else { (cell_h * 2.0).round() };
+            project_bar_h + tab_bar_h
+        };
+        let ox = vp.x + crate::renderer::PANE_H_PADDING;
+        let oy = vp.y + bars_h;
+        let col = ((x - ox) / cell_w).floor().max(0.0) as u16;
+        let row = ((y - oy) / cell_h).floor().max(0.0) as usize;
+        let term = pane.terminal.read();
+        let col = col.min(term.cols.saturating_sub(1));
+        let abs_line = (term.scrollback_len() as i64 - term.scroll_offset() as i64 + row as i64).max(0) as usize;
+        (col, abs_line)
+    }
+
+    fn do_context_action(&mut self, item: Option<ContextMenuItem>) {
+        self.context_menu = None;
+        match item {
+            Some(ContextMenuItem::Copy) => {
+                if let Some(pane) = self.focused_pane() {
+                    let mut term = pane.terminal.write();
+                    let text = term.selected_text();
+                    if !text.is_empty() {
+                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                            let _ = clipboard.set_text(&text);
+                        }
+                        term.clear_selection();
+                    }
+                }
+            }
+            Some(ContextMenuItem::Paste) => {
+                if let Some(pane) = self.focused_pane() {
+                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                        if let Ok(text) = clipboard.get_text() {
+                            let bracketed = pane.terminal.read().bracketed_paste;
+                            if bracketed {
+                                pane.pty.write(b"\x1b[200~");
+                            }
+                            pane.pty.write(text.as_bytes());
+                            if bracketed {
+                                pane.pty.write(b"\x1b[201~");
+                            }
+                        }
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+
     fn resize_all_panes(&mut self) {
         let size = self.window.inner_size();
         let viewport_w = size.width as f32;
@@ -678,16 +1227,8 @@ impl KovaWindow {
         }
 
         let (cell_w, cell_h) = self.renderer.cell_size();
-        let project_bar_h = if self.projects.len() > 1 { (cell_h * 1.5).round() } else { 0.0 };
-        let proj = match self.projects.get(self.active_project) {
-            Some(p) => p,
-            None => return,
-        };
-        let tab_bar_h = if proj.tabs.len() > 1 {
-            (cell_h * 2.0).round()
-        } else {
-            0.0
-        };
+        let project_bar_h = (cell_h * 1.5).round();
+        let tab_bar_h = if self.show_all { 0.0 } else { (cell_h * 2.0).round() };
         let global_bar_h = cell_h;
         let status_bar_h = if self.renderer.status_bar_enabled() {
             cell_h
@@ -695,31 +1236,59 @@ impl KovaWindow {
             0.0
         };
         let bars_h = project_bar_h + tab_bar_h;
-        let pane_area_y = bars_h;
         let pane_area_h = viewport_h - bars_h - global_bar_h;
 
-        let total_vp = PaneViewport {
-            x: 0.0,
-            y: pane_area_y,
-            width: viewport_w,
-            height: pane_area_h,
+        // Collect tabs to resize
+        let tabs_to_resize: Vec<&Tab> = if self.show_all {
+            self.projects.iter().flat_map(|p| p.tabs.iter()).collect()
+        } else {
+            match self.projects.get(self.active_project) {
+                Some(p) => p.tabs.iter().collect(),
+                None => return,
+            }
         };
 
-        if let Some(tab) = proj.tabs.get(proj.active_tab) {
-            tab.tree
-                .for_each_pane_with_viewport(total_vp, &mut |pane, vp| {
-                    let usable_h = vp.height - status_bar_h;
-                    let usable_w = vp.width - 2.0 * crate::renderer::PANE_H_PADDING;
-                    let cols = (usable_w / cell_w).floor().max(1.0) as u16;
-                    let rows = (usable_h / cell_h).floor().max(1.0) as u16;
+        let tab_count = tabs_to_resize.len();
+        let (grid_cols, grid_rows) = if tab_count <= 1 {
+            (1, 1)
+        } else {
+            let ratio = viewport_w / pane_area_h;
+            let cols = (((tab_count as f32) * ratio).sqrt()).round() as usize;
+            let cols = cols.max(1).min(tab_count);
+            let rows = (tab_count + cols - 1) / cols;
+            (cols, rows)
+        };
 
-                    let mut term = pane.terminal.write();
-                    if term.cols != cols || term.rows != rows {
-                        term.resize(cols, rows);
-                        drop(term);
-                        pane.pty.resize(cols, rows);
-                    }
-                });
+        let gap = 2.0_f32;
+        let cell_w_grid = (viewport_w - (grid_cols as f32 - 1.0) * gap) / grid_cols as f32;
+        let cell_h_grid = (pane_area_h - (grid_rows as f32 - 1.0) * gap) / grid_rows as f32;
+
+        for (tab_i, tab) in tabs_to_resize.iter().enumerate() {
+            let col = tab_i % grid_cols;
+            let row = tab_i / grid_cols;
+            let cx = col as f32 * (cell_w_grid + gap);
+            let cy = bars_h + row as f32 * (cell_h_grid + gap);
+
+            let tab_vp = PaneViewport {
+                x: cx,
+                y: cy,
+                width: cell_w_grid,
+                height: cell_h_grid,
+            };
+
+            tab.tree.for_each_pane_with_viewport(tab_vp, &mut |pane, vp| {
+                let usable_h = vp.height - status_bar_h;
+                let usable_w = vp.width - 2.0 * crate::renderer::PANE_H_PADDING;
+                let cols = (usable_w / cell_w).floor().max(1.0) as u16;
+                let rows = (usable_h / cell_h).floor().max(1.0) as u16;
+
+                let mut term = pane.terminal.write();
+                if term.cols != cols || term.rows != rows {
+                    term.resize(cols, rows);
+                    drop(term);
+                    pane.pty.resize(cols, rows);
+                }
+            });
         }
     }
 
@@ -887,8 +1456,8 @@ impl KovaWindow {
 
         let size = self.window.inner_size();
         let (_, cell_h) = self.renderer.cell_size();
-        let project_bar_h = if self.projects.len() > 1 { (cell_h * 1.5).round() } else { 0.0 };
-        let tab_bar_h = if proj.tabs.len() > 1 { (cell_h * 2.0).round() } else { 0.0 };
+        let project_bar_h = (cell_h * 1.5).round();
+        let tab_bar_h = (cell_h * 2.0).round();
         let global_bar_h = cell_h;
         let bars_h = project_bar_h + tab_bar_h;
         let total_vp = PaneViewport {
@@ -906,12 +1475,12 @@ impl KovaWindow {
     fn do_swap_pane(&mut self, dir: NavDirection) {
         let size = self.window.inner_size();
         let (_, cell_h) = self.renderer.cell_size();
-        let project_bar_h = if self.projects.len() > 1 { (cell_h * 1.5).round() } else { 0.0 };
+        let project_bar_h = (cell_h * 1.5).round();
         let proj = match self.projects.get(self.active_project) {
             Some(p) => p,
             None => return,
         };
-        let tab_bar_h = if proj.tabs.len() > 1 { (cell_h * 2.0).round() } else { 0.0 };
+        let tab_bar_h = (cell_h * 2.0).round();
         let global_bar_h = cell_h;
         let bars_h = project_bar_h + tab_bar_h;
         let total_vp = PaneViewport {

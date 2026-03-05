@@ -6,6 +6,7 @@
 |----------|--------|
 | Super+T | New tab |
 | Super+W | Close pane (or tab if last pane) |
+| Super+0 | Show all terminals (grid overview) |
 | Super+1..9 | Switch to tab N |
 | Super+Shift+[ | Previous tab |
 | Super+Shift+] | Next tab |

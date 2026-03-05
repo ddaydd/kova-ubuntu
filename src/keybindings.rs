@@ -24,6 +24,7 @@ pub enum KeyType {
     Backspace,
     Enter,
     F1,
+    F2,
     F11,
 }
 
@@ -49,6 +50,8 @@ pub enum Action {
     RenamePane,
     DetachTab,
     MergeWindow,
+    MoveTabToNextProject,
+    MoveTabToPrevProject,
     SwitchTab(usize),
     Navigate(NavDirection),
     SwapPane(NavDirection),
@@ -56,6 +59,7 @@ pub enum Action {
     ToggleHelp,
     SaveSession,
     ToggleFullscreen,
+    ShowAllTerminals,
 }
 
 /// Terminal-level actions dispatched from handle_key_event.
@@ -90,6 +94,7 @@ impl KeyCombo {
             Key::Named(NamedKey::Backspace) => KeyType::Backspace,
             Key::Named(NamedKey::Enter) => KeyType::Enter,
             Key::Named(NamedKey::F1) => KeyType::F1,
+            Key::Named(NamedKey::F2) => KeyType::F2,
             Key::Named(NamedKey::F11) => KeyType::F11,
             Key::Character(s) => {
                 let c = s.chars().next().unwrap_or('\0').to_ascii_lowercase();
@@ -143,6 +148,7 @@ fn parse_key_combo(s: &str) -> KeyCombo {
                 "backspace" | "delete" => KeyType::Backspace,
                 "enter" | "return" => KeyType::Enter,
                 "f1" => KeyType::F1,
+                "f2" => KeyType::F2,
                 "f11" => KeyType::F11,
                 "[" => KeyType::Char('['),
                 "]" => KeyType::Char(']'),
@@ -189,9 +195,12 @@ impl Keybindings {
         bind(&keys.rename_pane, Action::RenamePane);
         bind(&keys.detach_tab, Action::DetachTab);
         bind(&keys.merge_window, Action::MergeWindow);
+        bind(&keys.move_tab_to_next_project, Action::MoveTabToNextProject);
+        bind(&keys.move_tab_to_prev_project, Action::MoveTabToPrevProject);
         bind(&keys.toggle_help, Action::ToggleHelp);
         bind(&keys.save_session, Action::SaveSession);
         bind(&keys.toggle_fullscreen, Action::ToggleFullscreen);
+        bind(&keys.show_all_terminals, Action::ShowAllTerminals);
 
         for (i, s) in [
             &keys.switch_tab_1, &keys.switch_tab_2, &keys.switch_tab_3,
