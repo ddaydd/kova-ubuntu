@@ -17,6 +17,7 @@ pub fn handle_key_event(
     pty: &Pty,
     cursor_keys_app: bool,
     keybindings: &Keybindings,
+    text: Option<&str>,
 ) {
     let combo = KeyCombo::from_winit(key, modifiers);
     let state = modifiers.state();
@@ -109,8 +110,10 @@ pub fn handle_key_event(
         }
     }
 
-    // Regular character input
-    if let Key::Character(s) = key {
-        pty.write(s.as_bytes());
+    // Regular character input — use event.text (None when Super/modifier held)
+    if let Some(t) = text {
+        if !t.is_empty() {
+            pty.write(t.as_bytes());
+        }
     }
 }

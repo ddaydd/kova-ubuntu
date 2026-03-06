@@ -503,8 +503,7 @@ impl KovaWindow {
             let title = self.projects.get(d.src_project)
                 .and_then(|p| p.tabs.get(d.src_tab))
                 .map(|t| t.title())?;
-            let scale = self.window.scale_factor() as f32;
-            Some((title, self.mouse_x as f32 / scale, self.mouse_y as f32 / scale))
+            Some((title, self.mouse_x as f32, self.mouse_y as f32))
         });
         let drag_ref = drag_label.as_ref().map(|(s, x, y)| (s.as_str(), *x, *y));
 
@@ -777,6 +776,7 @@ impl KovaWindow {
                         &pane.pty,
                         cursor_keys_app,
                         &self.keybindings,
+                        event.text.as_deref(),
                     );
                 }
             }
@@ -784,12 +784,11 @@ impl KovaWindow {
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse_x = position.x;
                 self.mouse_y = position.y;
-                // Check drag threshold (5 logical pixels)
+                // Check drag threshold (5 physical pixels)
                 if let Some(ref mut drag) = self.drag {
                     if !drag.dragging {
-                        let scale = self.window.scale_factor();
-                        let dx = position.x / scale - drag.start_x;
-                        let dy = position.y / scale - drag.start_y;
+                        let dx = position.x - drag.start_x;
+                        let dy = position.y - drag.start_y;
                         if dx * dx + dy * dy > 25.0 {
                             drag.dragging = true;
                         }
@@ -797,9 +796,8 @@ impl KovaWindow {
                 }
                 // Update text selection during drag
                 if let Some(ref sel) = self.text_select {
-                    let scale = self.window.scale_factor();
-                    let x = position.x as f32 / scale as f32;
-                    let y = position.y as f32 / scale as f32;
+                    let x = position.x as f32;
+                    let y = position.y as f32;
                     let pane_id = sel.pane_id;
                     let vp = sel.viewport;
                     // Find the pane by id to update selection
@@ -818,9 +816,8 @@ impl KovaWindow {
                 }
                 // Update context menu hover
                 if let Some(ref mut menu) = self.context_menu {
-                    let scale = self.window.scale_factor();
-                    let mx = self.mouse_x as f32 / scale as f32;
-                    let my = self.mouse_y as f32 / scale as f32;
+                    let mx = self.mouse_x as f32;
+                    let my = self.mouse_y as f32;
                     let (cell_w, cell_h) = self.renderer.cell_size();
                     let item_w = cell_w * 12.0;
                     let item_h = cell_h * 1.8;
@@ -844,9 +841,8 @@ impl KovaWindow {
                 button: MouseButton::Left,
                 ..
             } => {
-                let scale = self.window.scale_factor();
-                let x = self.mouse_x / scale;
-                let y = self.mouse_y / scale;
+                let x = self.mouse_x;
+                let y = self.mouse_y;
                 let (cell_w, cell_h) = self.renderer.cell_size();
 
                 // Check if clicking inside context menu
@@ -870,11 +866,11 @@ impl KovaWindow {
 
                 let project_bar_h = (cell_h * 1.5).round();
                 let tab_bar_h = (cell_h * 2.0).round();
-                let viewport_h = self.surface_config.height as f32 / scale as f32;
+                let viewport_h = self.surface_config.height as f32;
 
                 if (y as f32) < project_bar_h {
                     // Click in project bar
-                    let viewport_w = self.surface_config.width as f64 / scale;
+                    let viewport_w = self.surface_config.width as f64;
                     let max_proj_w = cell_w as f64 * 20.0;
                     if self.show_all {
                         // In show_all mode: slot 0 = "All" (already active), slots 1..N = projects, last = "+"
@@ -909,7 +905,7 @@ impl KovaWindow {
                     }
                 } else if !self.show_all && (y as f32) < project_bar_h + tab_bar_h {
                     // Click in tab bar (not visible in show_all mode)
-                    let viewport_w = self.surface_config.width as f64 / scale;
+                    let viewport_w = self.surface_config.width as f64;
                     let max_tab_w = cell_w as f64 * 20.0;
                     let tab_count = self.project().tabs.len();
                     let tab_width = (viewport_w / (tab_count + 1) as f64).min(max_tab_w);
@@ -961,14 +957,13 @@ impl KovaWindow {
                 if let Some(drag) = self.drag.take() {
                     if drag.dragging {
                         // Drop: check if mouse is over the project bar
-                        let scale = self.window.scale_factor();
-                        let x = self.mouse_x / scale;
-                        let y = self.mouse_y / scale;
+                        let x = self.mouse_x;
+                        let y = self.mouse_y;
                         let (cell_w, cell_h) = self.renderer.cell_size();
                         let project_bar_h = (cell_h * 1.5).round();
 
                         if (y as f32) < project_bar_h {
-                            let viewport_w = self.surface_config.width as f64 / scale;
+                            let viewport_w = self.surface_config.width as f64;
                             let max_proj_w = cell_w as f64 * 20.0;
                             let proj_count = self.projects.len();
                             let proj_width = (viewport_w / (proj_count + 1) as f64).min(max_proj_w);
@@ -1012,15 +1007,14 @@ impl KovaWindow {
                 ..
             } => {
                 // Right-click on project bar → rename project
-                let scale = self.window.scale_factor();
-                let x = self.mouse_x / scale;
-                let y = self.mouse_y / scale;
+                let x = self.mouse_x;
+                let y = self.mouse_y;
                 let (cell_w, cell_h) = self.renderer.cell_size();
                 let project_bar_h = (cell_h * 1.5).round();
 
                 if (y as f32) < project_bar_h {
                     // Right-click on project bar → rename project
-                    let viewport_w = self.surface_config.width as f64 / scale;
+                    let viewport_w = self.surface_config.width as f64;
                     let max_proj_w = cell_w as f64 * 20.0;
                     if self.show_all {
                         let slot_count = 1 + self.projects.len() + 1;
@@ -1115,13 +1109,12 @@ impl KovaWindow {
         tab.tree.pane(tab.focused_pane)
     }
 
-    /// Hit-test mouse position (logical coords) against all visible panes.
+    /// Hit-test mouse position (physical coords) against all visible panes.
     /// Returns the pane and its viewport.
     fn pane_at(&self, x: f32, y: f32) -> Option<(&Pane, PaneViewport)> {
         let size = self.window.inner_size();
-        let scale = self.window.scale_factor() as f32;
-        let viewport_w = size.width as f32 / scale;
-        let viewport_h = size.height as f32 / scale;
+        let viewport_w = size.width as f32;
+        let viewport_h = size.height as f32;
         let (_, cell_h) = self.renderer.cell_size();
         let project_bar_h = (cell_h * 1.5).round();
         let tab_bar_h = if self.show_all { 0.0 } else { (cell_h * 2.0).round() };
@@ -1174,9 +1167,13 @@ impl KovaWindow {
         };
         let ox = vp.x + crate::renderer::PANE_H_PADDING;
         let oy = vp.y + bars_h;
-        let col = ((x - ox) / cell_w).floor().max(0.0) as u16;
-        let row = ((y - oy) / cell_h).floor().max(0.0) as usize;
         let term = pane.terminal.read();
+        // Account for y_offset (content pushed down when screen isn't full)
+        let y_offset_rows = term.y_offset_rows() as f32;
+        let content_height = (term.rows as f32 - y_offset_rows) * cell_h;
+        let y_offset = (y_offset_rows * cell_h).min((vp.height - content_height).max(0.0));
+        let col = ((x - ox) / cell_w).floor().max(0.0) as u16;
+        let row = ((y - oy - y_offset) / cell_h).floor().max(0.0) as usize;
         let col = col.min(term.cols.saturating_sub(1));
         let abs_line = (term.scrollback_len() as i64 - term.scroll_offset() as i64 + row as i64).max(0) as usize;
         (col, abs_line)

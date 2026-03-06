@@ -41,18 +41,7 @@ impl App {
     }
 
     fn create_initial_windows(&mut self, event_loop: &ActiveEventLoop) {
-        // If a start directory is given, skip session restore
-        if let Some(ref dir) = self.start_dir {
-            let tab = crate::pane::Tab::new_with_cwd(&self.config, Some(dir.as_str()))
-                .expect("failed to create initial tab");
-            let proj = crate::pane::Project::new(dir.clone(), tab);
-            match KovaWindow::new(event_loop, &self.config, vec![proj], 0) {
-                Ok(win) => { self.windows.insert(win.id(), win); }
-                Err(e) => log::error!("Failed to create window: {}", e),
-            }
-            return;
-        }
-
+        // Always try to restore session first
         let restored = crate::session::load(self.session_backup)
             .and_then(|s| crate::session::restore_session(s, &self.config));
 
@@ -68,12 +57,20 @@ impl App {
                         Err(e) => log::error!("Failed to create window: {}", e),
                     }
                 }
+                // If a start directory was given, open it as a new project in the first window
+                if let Some(ref dir) = self.start_dir {
+                    if let Some(win) = self.windows.values_mut().next() {
+                        win.open_project(dir);
+                    }
+                }
             }
             None => {
-                let tab = crate::pane::Tab::new(&self.config)
+                // No session to restore — create a window with the start dir or $HOME
+                let dir = self.start_dir.clone()
+                    .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/".into()));
+                let tab = crate::pane::Tab::new_with_cwd(&self.config, Some(dir.as_str()))
                     .expect("failed to create initial tab");
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
-                let proj = crate::pane::Project::new(home, tab);
+                let proj = crate::pane::Project::new(dir, tab);
                 match KovaWindow::new(event_loop, &self.config, vec![proj], 0) {
                     Ok(win) => {
                         let id = win.id();
