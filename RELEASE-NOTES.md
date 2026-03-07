@@ -1,6 +1,6 @@
 # Kova Linux — Release Notes
 
-## 2026-03-07
+## v1.2.0 — 2026-03-07
 
 ### Fix Super+V "v" parasite (round 2 — Ctrl+Shift+V/C)
 - Le fix precedent (`event.text` au lieu de `logical_key`) ne suffit pas : sur X11/GNOME, `event.text` retourne `Some("v")` meme avec Super enfonce car Super ne modifie pas le keysym XKB
