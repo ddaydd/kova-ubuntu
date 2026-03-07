@@ -446,30 +446,20 @@ impl KovaWindow {
             tab.tree.collect_separators(tab_vp, &mut separators);
         }
 
-        // Project titles: prepend "All" entry when in show_all mode
-        let project_titles: Vec<(String, bool)> = if self.show_all {
-            let mut titles = vec![("All".to_string(), true)];
-            titles.extend(self.projects.iter().enumerate().map(|(i, p)| {
-                let name = if self.rename_project.as_ref().is_some_and(|r| r.project_idx == i) {
-                    format!("{}|", self.rename_project.as_ref().unwrap().input)
-                } else {
-                    p.name()
-                };
-                (name, false)
-            }));
-            titles
-        } else {
-            self.projects.iter().enumerate()
-                .map(|(i, p)| {
-                    let name = if self.rename_project.as_ref().is_some_and(|r| r.project_idx == i) {
-                        format!("{}|", self.rename_project.as_ref().unwrap().input)
-                    } else {
-                        p.name()
-                    };
-                    (name, i == self.active_project)
-                })
-                .collect()
-        };
+        // Project titles: prepend "All" entry when there are 2+ projects
+        let has_all_tab = self.projects.len() >= 2;
+        let mut project_titles: Vec<(String, bool)> = Vec::new();
+        if has_all_tab {
+            project_titles.push(("All".to_string(), self.show_all));
+        }
+        project_titles.extend(self.projects.iter().enumerate().map(|(i, p)| {
+            let name = if self.rename_project.as_ref().is_some_and(|r| r.project_idx == i) {
+                format!("{}|", self.rename_project.as_ref().unwrap().input)
+            } else {
+                p.name()
+            };
+            (name, !self.show_all && i == self.active_project)
+        }));
 
         // Tab titles (hidden in show_all mode)
         let tab_titles: Vec<(String, bool, Option<usize>, bool, bool)> = if self.show_all {
@@ -729,8 +719,10 @@ impl KovaWindow {
                         Action::MoveTabToNextProject => self.do_move_tab_to_project(1),
                         Action::MoveTabToPrevProject => self.do_move_tab_to_project(-1),
                         Action::ShowAllTerminals => {
-                            self.show_all = !self.show_all;
-                            self.resize_all_panes();
+                            if self.projects.len() >= 2 {
+                                self.show_all = !self.show_all;
+                                self.resize_all_panes();
+                            }
                         }
                         Action::Copy => {
                             if let Some(pane) = self.focused_pane() {
@@ -872,36 +864,23 @@ impl KovaWindow {
                     // Click in project bar
                     let viewport_w = self.surface_config.width as f64;
                     let max_proj_w = cell_w as f64 * 20.0;
-                    if self.show_all {
-                        // In show_all mode: slot 0 = "All" (already active), slots 1..N = projects, last = "+"
-                        let slot_count = 1 + self.projects.len() + 1; // "All" + projects + "+"
-                        let proj_width = (viewport_w / slot_count as f64).min(max_proj_w);
-                        let clicked = (x / proj_width) as usize;
-                        if clicked == 0 {
-                            // Already on "All", do nothing
-                        } else if clicked <= self.projects.len() {
-                            // Switch to specific project
-                            self.show_all = false;
-                            self.active_project = clicked - 1;
-                            self.resize_all_panes();
-                        } else {
-                            // "+" button
-                            self.show_all = false;
-                            self.do_new_project();
-                        }
+                    let has_all_tab = self.projects.len() >= 2;
+                    let all_offset: usize = if has_all_tab { 1 } else { 0 };
+                    let slot_count = all_offset + self.projects.len() + 1; // [All] + projects + "+"
+                    let proj_width = (viewport_w / slot_count as f64).min(max_proj_w);
+                    let clicked = (x / proj_width) as usize;
+                    if has_all_tab && clicked == 0 {
+                        // Toggle show_all
+                        self.show_all = !self.show_all;
+                        self.resize_all_panes();
+                    } else if clicked >= all_offset && clicked < all_offset + self.projects.len() {
+                        // Switch to specific project
+                        self.show_all = false;
+                        self.active_project = clicked - all_offset;
+                        self.resize_all_panes();
                     } else {
-                        let proj_count = self.projects.len();
-                        let proj_width = (viewport_w / (proj_count + 1) as f64).min(max_proj_w);
-                        let plus_x = proj_count as f64 * proj_width;
-                        if x >= plus_x && x < plus_x + proj_width {
-                            self.do_new_project();
-                        } else {
-                            let clicked = (x / proj_width) as usize;
-                            if clicked < proj_count {
-                                self.active_project = clicked;
-                                self.resize_all_panes();
-                            }
-                        }
+                        // "+" button
+                        self.do_new_project();
                     }
                 } else if !self.show_all && (y as f32) < project_bar_h + tab_bar_h {
                     // Click in tab bar (not visible in show_all mode)
@@ -980,11 +959,15 @@ impl KovaWindow {
                         if (y as f32) < project_bar_h {
                             let viewport_w = self.surface_config.width as f64;
                             let max_proj_w = cell_w as f64 * 20.0;
-                            let proj_count = self.projects.len();
-                            let proj_width = (viewport_w / (proj_count + 1) as f64).min(max_proj_w);
-                            let target_proj = (x / proj_width) as usize;
+                            let has_all_tab = self.projects.len() >= 2;
+                            let all_offset: usize = if has_all_tab { 1 } else { 0 };
+                            let slot_count = all_offset + self.projects.len() + 1;
+                            let proj_width = (viewport_w / slot_count as f64).min(max_proj_w);
+                            let clicked = (x / proj_width) as usize;
+                            // slot 0 = "All" when present (ignore drop), then projects
+                            let target_proj = if clicked >= all_offset { clicked - all_offset } else { usize::MAX };
 
-                            if target_proj < proj_count && target_proj != drag.src_project {
+                            if target_proj < self.projects.len() && target_proj != drag.src_project {
                                 // Move tab from src to target project
                                 let src = &mut self.projects[drag.src_project];
                                 let tab = src.tabs.remove(drag.src_tab);
@@ -993,6 +976,9 @@ impl KovaWindow {
                                 // If source project is now empty, remove it
                                 if src.tabs.is_empty() {
                                     self.projects.remove(drag.src_project);
+                                    if self.projects.len() < 2 {
+                                        self.show_all = false;
+                                    }
                                     // Adjust target index if source was before target
                                     let adjusted_target = if drag.src_project < target_proj {
                                         target_proj - 1
@@ -1031,30 +1017,18 @@ impl KovaWindow {
                     // Right-click on project bar → rename project
                     let viewport_w = self.surface_config.width as f64;
                     let max_proj_w = cell_w as f64 * 20.0;
-                    if self.show_all {
-                        let slot_count = 1 + self.projects.len() + 1;
-                        let proj_width = (viewport_w / slot_count as f64).min(max_proj_w);
-                        let clicked = (x / proj_width) as usize;
-                        // slot 0 = "All" (not renamable), 1..N = projects
-                        if clicked >= 1 && clicked <= self.projects.len() {
-                            let idx = clicked - 1;
-                            let current = self.projects[idx].name();
-                            self.rename_project = Some(RenameProjectState {
-                                project_idx: idx,
-                                input: current,
-                            });
-                        }
-                    } else {
-                        let proj_count = self.projects.len();
-                        let proj_width = (viewport_w / (proj_count + 1) as f64).min(max_proj_w);
-                        let clicked = (x / proj_width) as usize;
-                        if clicked < proj_count {
-                            let current = self.projects[clicked].name();
-                            self.rename_project = Some(RenameProjectState {
-                                project_idx: clicked,
-                                input: current,
-                            });
-                        }
+                    let has_all_tab = self.projects.len() >= 2;
+                    let all_offset: usize = if has_all_tab { 1 } else { 0 };
+                    let slot_count = all_offset + self.projects.len() + 1;
+                    let proj_width = (viewport_w / slot_count as f64).min(max_proj_w);
+                    let clicked = (x / proj_width) as usize;
+                    if clicked >= all_offset && clicked < all_offset + self.projects.len() {
+                        let idx = clicked - all_offset;
+                        let current = self.projects[idx].name();
+                        self.rename_project = Some(RenameProjectState {
+                            project_idx: idx,
+                            input: current,
+                        });
                     }
                 } else {
                     // Right-click in pane area → context menu
@@ -1362,6 +1336,9 @@ impl KovaWindow {
                     if self.projects.is_empty() {
                         self.closing = true;
                     } else {
+                        if self.projects.len() < 2 {
+                            self.show_all = false;
+                        }
                         self.active_project = self.active_project.min(self.projects.len() - 1);
                         self.resize_all_panes();
                     }
