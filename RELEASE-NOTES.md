@@ -24,6 +24,11 @@
 - Overlay d'aide organise en 5 sections : Tabs, Splits, Projects & Windows, Editing, System
 - Raccourcis manquants ajoutes : Super+0 (show all), Super+E/Shift+E (root splits), Super+Shift+R (rename), Super+Shift+T (detach), Super+Shift+M (merge), Ctrl+Shift+C/V
 
+### Fix pane actif absent en mode "Show All"
+- En mode Show All (Super+0), aucun pane n'etait marque comme actif/focused (pas de bordure)
+- Cause : tous les tabs etaient marques `is_active_tab = false` en mode show_all
+- Fix : on identifie le tab actif du projet actif pour marquer le bon pane comme focused
+
 ### Debug selection texte decalee d'une ligne (en cours)
 - Ajout de logs debug dans `mouse_to_grid` et `build_vertices` pour diagnostic
 

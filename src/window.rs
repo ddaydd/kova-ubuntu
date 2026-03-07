@@ -384,8 +384,10 @@ impl KovaWindow {
 
         // Collect tabs: all projects in show_all mode, or just active project
         let all_tabs: Vec<(&Tab, bool)> = if self.show_all {
+            let active_proj = &self.projects[self.active_project];
+            let active_tab_id = active_proj.tabs.get(active_proj.active_tab).map(|t| t.id);
             self.projects.iter().flat_map(|p| {
-                p.tabs.iter().map(|t| (t, false))
+                p.tabs.iter().map(move |t| (t, Some(t.id) == active_tab_id))
             }).collect()
         } else {
             let proj = &self.projects[self.active_project];
