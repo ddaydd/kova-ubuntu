@@ -1,4 +1,4 @@
-# Kova Ubuntu — Release Notes
+# Kova Linux — Release Notes
 
 ## 2026-03-07
 
@@ -7,8 +7,6 @@
 - Cause racine probable : GNOME grab la touche Super sur X11, donc `ModifiersChanged` n'arrive pas (ou pas a temps) et le keybinding `cmd+v` ne matche pas
 - Fix : ajout de `Ctrl+Shift+V` (paste) et `Ctrl+Shift+C` (copy) comme keybindings additionnels dans `keybindings.rs` — standard Linux (gnome-terminal, kitty, alacritty)
 - Les bindings `cmd+v`/`cmd+c` restent (fonctionnent si le systeme passe Super)
-- Log de diagnostic ameliore pour tracer `super=true/false` et `text` sur les key events
-- Fichiers modifies : `keybindings.rs`, `window.rs`
 
 ### Fix perte de session (4 bugs)
 - Le fichier session.json etait supprime au chargement — un crash avant la premiere sauvegarde periodique (30s) perdait toute la session
@@ -16,39 +14,46 @@
 - La sauvegarde a la sortie etait dans un thread — `process::exit()` pouvait tuer le thread avant la fin de l'ecriture
 - Les fenetres etaient retirees de la map AVANT la sauvegarde — la session sauvee etait vide
 - Fix : suppression du `remove_file` au load, ecriture atomique (tmp+rename), sauvegarde synchrone, save avant remove
-- Fichiers modifies : `session.rs`, `app.rs`
+
+### Aide F1 reorganisee par sections
+- Overlay d'aide organise en 5 sections : Tabs, Splits, Projects & Windows, Editing, System
+- Raccourcis manquants ajoutes : Super+0 (show all), Super+E/Shift+E (root splits), Super+Shift+R (rename), Super+Shift+T (detach), Super+Shift+M (merge), Ctrl+Shift+C/V
 
 ### Debug selection texte decalee d'une ligne (en cours)
-- La selection souris est decalee d'une ligne vers le bas
 - Ajout de logs debug dans `mouse_to_grid` et `build_vertices` pour diagnostic
-- En attente des valeurs de log pour identifier la cause
-- Fichiers modifies : `window.rs`, `renderer/mod.rs`
 
 ## 2026-03-06
 
+### Vue "All terminals" (Super+0)
+- Nouveau mode grille affichant tous les terminaux de tous les projets
+- Entree "All" dans la project bar (premier slot)
+- Clic sur un pane = switch au projet/tab correspondant et quitte le mode All
+- Tab bar masquee en mode All
+
+### Rename project (clic droit)
+- Clic droit sur un projet dans la project bar = renommer
+- `custom_name` sauvegarde/restaure avec la session
+
+### Selection de texte a la souris
+- Clic gauche dans un pane = debut de selection, drag = extension, relachement = fin
+
+### Menu contextuel (clic droit dans un pane)
+- Copy / Paste via menu contextuel, Copy grise si pas de selection
+
 ### Fix clic pour changer de terminal en vue grille
-- Cliquer sur un terminal dans la grille (multi-tabs) ne changeait plus le focus
-- Regression introduite par l'ajout de la selection texte a la souris : le clic demarrait la selection mais ne mettait plus a jour `active_tab` / `focused_pane`
-- Fix : apres le hit-test du pane clique, on met a jour `active_project`, `active_tab` et `focused_pane`
-- Fichier modifie : `window.rs` (handler MouseInput Left Pressed, zone pane)
+- Regression : le clic demarrait la selection mais ne mettait plus a jour le focus
+- Fix : apres le hit-test, on met a jour `active_project`, `active_tab` et `focused_pane`
 
 ### Fix Super+V colle un "v" parasite
-- Super+V envoyait le caractere "v" au PTY en plus du contenu colle
-- Cause : `handle_key_event` utilisait `event.logical_key` (qui donne `Character("v")` meme avec Super) pour ecrire au PTY
-- Fix : utilise `event.text` (qui est `None` quand un modificateur comme Super est actif) pour l'envoi de caracteres reguliers
-- Fichiers modifies : `input.rs` (nouveau param `text: Option<&str>`), `window.rs` (passe `event.text.as_deref()`)
+- Cause : `handle_key_event` utilisait `event.logical_key` au lieu de `event.text`
+- Fix : utilise `event.text` (None quand un modificateur comme Super est actif)
 
 ### Fix selection souris decalee de 2 lignes
-- La selection texte a la souris tombait ~2 lignes en dessous du clic
-- Cause : `mouse_to_grid()` ne tenait pas compte du `y_offset` (decalage vertical quand le terminal n'est pas plein, via `y_offset_rows()`)
-- Fix : soustrait `y_offset` dans le calcul de la ligne, meme formule que le renderer
-- Fichier modifie : `window.rs` (mouse_to_grid)
+- `mouse_to_grid()` ne tenait pas compte du `y_offset`
 
 ### Fix coordonnees souris (scale factor)
-- Les handlers souris melangeaient pixels logiques (souris / scale) et pixels physiques (cell_size, renderer)
-- Avec un scale != 1 (fractional scaling Ubuntu), les clics sur tabs, la selection texte, le menu contextuel et le drag pointaient au mauvais endroit
-- Fix : toutes les coordonnees souris restent en pixels physiques, coherent avec cell_size() et le renderer
-- Fichier modifie : `window.rs` (CursorMoved, MouseInput left/right/release, pane_at, drag label)
+- Les handlers souris melangeaient pixels logiques et physiques
+- Fix : tout en pixels physiques, coherent avec cell_size() et le renderer
 
 ## 2026-03-05
 
@@ -77,3 +82,54 @@
 - Save session passe sur F2 (F-key safe, pas de conflit terminal)
 - F2 ajoute au KeyType enum + mappings
 - Aide F1 mise a jour avec F2/Save session et Move tab to project
+
+## 2026-03-04
+
+### F11 fullscreen + F1 help
+- F11 toggle fullscreen
+- F1 toggle help overlay
+
+### Desktop integration (`--install`)
+- `kova --install` : symlink `~/.local/bin/kova`, fichier `.desktop`, action Nemo
+- `kova --install --autostart` : idem + lancement au login
+- `kova --uninstall` : supprime tout
+- `kova --help` : affiche toutes les options CLI
+
+### Argument repertoire
+- `kova /chemin` ouvre le terminal dans le dossier specifie
+- Fonctionne avec "Ouvrir avec" depuis le gestionnaire de fichiers
+
+### Fix flash au demarrage
+- Fenetre creee invisible, premier frame rendu, puis affichee
+
+### Projects (groupement de tabs par dossier)
+- Structure `Project` : regroupe les tabs par dossier racine
+- Project bar au-dessus de la tab bar
+- Session sauvegarde/restaure les projets (backward compat v2)
+
+### Instance unique (IPC socket Unix)
+- Socket `/run/user/$UID/kova.sock`
+- `kova /chemin` envoie le path a l'instance existante
+
+## v1.0.0 — Port Linux (2026-03-04)
+
+Fork du terminal macOS [Kova](https://github.com/ddaydd/kova) porte vers Linux.
+
+### Stack
+
+| macOS | Linux |
+|---|---|
+| Metal | wgpu (Vulkan/OpenGL) |
+| AppKit (NSWindow, NSView) | winit (X11/Wayland) |
+| CoreText | FreeType + fontconfig |
+| NSPasteboard | arboard (X11/Wayland clipboard) |
+
+### Rendu texte
+- LCD subpixel rendering via FreeType `TARGET_LCD`
+- Emoji couleur supportes via `FT_LOAD_COLOR` (BGRA)
+- Box-drawing characters rendus par code
+
+### Raccourcis clavier
+- **Super** (touche Win) remplace **Cmd**
+- **Alt** remplace **Option**
+- Tous les raccourcis sont configurables via `~/.config/kova/config.toml`

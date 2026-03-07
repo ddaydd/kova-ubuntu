@@ -2,8 +2,8 @@
 
 ## Vision
 
-Le terminal Mac le plus rapide et léger possible.
-Rust + Metal, zéro compromis cross-platform.
+Le terminal Linux le plus rapide et léger possible.
+Rust + wgpu, rendu GPU natif.
 
 ## V0 — Preuve de concept
 
@@ -131,7 +131,6 @@ Items intéressants mais non prioritaires — le gain ne justifie pas l'effort �
 
 ## Non-goals
 
-- Cross-platform (macOS uniquement)
 - Plugin system
 - Protocoles custom propriétaires
 - Multiplexer réseau (ssh tunneling etc.)

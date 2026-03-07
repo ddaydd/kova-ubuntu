@@ -1120,33 +1120,59 @@ impl Renderer {
         let padding = PANE_H_PADDING;
         let max_x = viewport_w - padding;
 
-        // Center the overlay content
-        let shortcuts: &[(&str, &str)] = &[
-            ("Super+T",            "New tab"),
-            ("Super+W",            "Close pane/tab"),
-            ("Super+D",            "Split vertical"),
-            ("Super+Shift+D",      "Split horizontal"),
-            ("Super+Shift+[",      "Previous tab"),
-            ("Super+Shift+]",      "Next tab"),
-            ("Super+1-9",          "Switch to tab"),
-            ("Super+Alt+Arrows",   "Navigate panes"),
-            ("Super+Shift+Arrows", "Swap panes"),
-            ("Super+Ctrl+Arrows",  "Resize panes"),
-            ("Super+Alt+Shift+L/R","Move tab to project"),
-            ("Super+F",            "Search"),
-            ("Super+C / Super+V",  "Copy / Paste"),
-            ("F2",                 "Save session"),
-            ("Super+K",            "Clear scrollback"),
-            ("Super+N",            "New window"),
-            ("Super+Q",            "Close window"),
-            ("F1",                 "Toggle this help"),
-            ("F11",                "Toggle fullscreen"),
+        // Sections: empty key = section header, key+desc = shortcut
+        let items: &[(&str, &str)] = &[
+            // -- Tabs --
+            ("",                        "Tabs"),
+            ("Super+T",                 "New tab"),
+            ("Super+W",                 "Close pane/tab"),
+            ("Super+Shift+[ / ]",       "Previous / Next tab"),
+            ("Super+1-9",               "Switch to tab"),
+            ("Super+Shift+R",           "Rename tab"),
+            ("Super+0",                 "Show all terminals"),
+            // -- Splits --
+            ("",                        "Splits"),
+            ("Super+D",                 "Split vertical"),
+            ("Super+Shift+D",           "Split horizontal"),
+            ("Super+E",                 "Split vertical (root)"),
+            ("Super+Shift+E",           "Split horizontal (root)"),
+            ("Super+Alt+Arrows",        "Navigate panes"),
+            ("Super+Shift+Arrows",      "Swap panes"),
+            ("Super+Ctrl+Arrows",       "Resize panes"),
+            // -- Projects & Windows --
+            ("",                        "Projects & Windows"),
+            ("Super+Alt+Shift+L/R",     "Move tab to project"),
+            ("Super+N",                 "New window"),
+            ("Super+Shift+T",           "Detach tab to new window"),
+            ("Super+Shift+M",           "Merge windows"),
+            ("Super+Q",                 "Close window"),
+            // -- Editing --
+            ("",                        "Editing"),
+            ("Ctrl+Shift+C / V",        "Copy / Paste"),
+            ("Super+F",                 "Search"),
+            ("Super+K",                 "Clear scrollback"),
+            // -- System --
+            ("",                        "System"),
+            ("F1",                      "Toggle this help"),
+            ("F2",                      "Save session"),
+            ("F11",                     "Toggle fullscreen"),
         ];
 
-        let content_h = (shortcuts.len() as f32 + 3.0) * cell_h; // title + blank + shortcuts + blank
+        // Count total lines (sections get 1 blank line before them, except the first)
+        let section_fg = [0.4, 0.7, 1.0, 1.0];
+        let mut total_lines = 0u32;
+        for (i, (key, _)) in items.iter().enumerate() {
+            if key.is_empty() {
+                total_lines += if i == 0 { 1 } else { 2 }; // section header (+ blank before)
+            } else {
+                total_lines += 1;
+            }
+        }
+
+        let content_h = (total_lines as f32 + 3.0) * cell_h;
         let start_y = ((viewport_h - content_h) / 2.0).max(cell_h);
-        let col_key_w = 20.0 * cell_w; // width for key column
-        let total_w = col_key_w + 20.0 * cell_w;
+        let col_key_w = 22.0 * cell_w;
+        let total_w = col_key_w + 24.0 * cell_w;
         let start_x = ((viewport_w - total_w) / 2.0).max(padding);
 
         // Title bar background
@@ -1160,12 +1186,22 @@ impl Renderer {
         let hint_w = hint.len() as f32 * cell_w;
         self.render_status_text(vertices, hint, viewport_w - hint_w - padding, start_y, max_x, hint_fg, no_bg);
 
-        // Shortcuts list
+        // Render items
+        let mut row = 0u32;
         let list_y = start_y + cell_h * 2.0;
-        for (i, (key, desc)) in shortcuts.iter().enumerate() {
-            let y = list_y + i as f32 * cell_h;
-            self.render_status_text(vertices, key, start_x, y, start_x + col_key_w, key_fg, no_bg);
-            self.render_status_text(vertices, desc, start_x + col_key_w, y, max_x, desc_fg, no_bg);
+        for (i, (key, desc)) in items.iter().enumerate() {
+            if key.is_empty() {
+                // Section header
+                if i > 0 { row += 1; } // blank line before (except first section)
+                let y = list_y + row as f32 * cell_h;
+                self.render_status_text(vertices, desc, start_x, y, max_x, section_fg, no_bg);
+                row += 1;
+            } else {
+                let y = list_y + row as f32 * cell_h;
+                self.render_status_text(vertices, key, start_x, y, start_x + col_key_w, key_fg, no_bg);
+                self.render_status_text(vertices, desc, start_x + col_key_w, y, max_x, desc_fg, no_bg);
+                row += 1;
+            }
         }
     }
 

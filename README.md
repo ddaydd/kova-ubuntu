@@ -80,25 +80,29 @@ min_width = 300.0  # minimum pane width in points before horizontal scroll activ
 
 ### Keyboard shortcuts
 
+See [`keyboard-shortcuts.md`](keyboard-shortcuts.md) for the full list. Highlights:
+
 | Shortcut | Action |
 |---|---|
 | Super+T | New tab |
 | Super+W | Close pane/tab |
-| Super+D | Vertical split (side by side) |
-| Super+Shift+D | Horizontal split (stacked) |
-| Super+E | Vertical split at root (full-height column) |
-| Super+Shift+E | Horizontal split at root (full-width row) |
-| Super+Shift+[ / ] | Previous/next tab |
+| Super+D / Super+Shift+D | Split vertical / horizontal |
+| Super+E / Super+Shift+E | Split vertical / horizontal (root) |
+| Super+Shift+[ / ] | Previous / next tab |
 | Super+1..9 | Jump to tab |
-| Super+Alt+Arrows | Navigate between splits (cross-tab) |
-| Super+Shift+Arrows | Swap pane with neighbor |
-| Super+Ctrl+Arrows | Resize split |
+| Super+0 | Show all terminals (grid) |
+| Super+Alt+Arrows | Navigate between panes |
+| Super+Shift+Arrows | Swap panes |
+| Super+Ctrl+Arrows | Resize splits |
 | Super+Shift+R | Rename tab |
+| Super+Alt+Shift+L/R | Move tab to project |
+| Ctrl+Shift+C / V | Copy / Paste |
 | Super+F | Search scrollback |
-| Super+K | Clear scrollback and screen |
-| Super+C | Copy selection |
-| Super+V | Paste |
+| Super+K | Clear scrollback |
+| Super+N | New window |
+| Super+Q | Close window |
 | F1 | Toggle help overlay |
+| F2 | Save session |
 | F11 | Toggle fullscreen |
 
 ## Prerequisites
