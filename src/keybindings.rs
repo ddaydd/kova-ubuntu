@@ -234,6 +234,10 @@ impl Keybindings {
             terminal_map.insert(combo, action);
         };
 
+        // Linux fallback: Ctrl+Shift+C/V for copy/paste (Super key is unreliable on GNOME X11)
+        window_map.entry(parse_key_combo("ctrl+shift+c")).or_insert(Action::Copy);
+        window_map.entry(parse_key_combo("ctrl+shift+v")).or_insert(Action::Paste);
+
         tbind(&term.kill_line, TerminalAction::KillLine);
         tbind(&term.home, TerminalAction::Home);
         tbind(&term.end, TerminalAction::End);

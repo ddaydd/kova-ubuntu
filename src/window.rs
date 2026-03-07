@@ -660,7 +660,7 @@ impl KovaWindow {
 
                 // Check window-level keybindings
                 let combo = KeyCombo::from_winit(&event.logical_key, &self.modifiers);
-                log::debug!("Key event: {:?} -> combo: {:?}", event.logical_key, combo);
+                log::debug!("Key event: {:?} -> combo: {:?}, super={}, text={:?}", event.logical_key, combo, self.modifiers.state().super_key(), event.text);
 
                 if let Some(action) = self.keybindings.window_map.get(&combo).cloned() {
                     match action {
@@ -930,10 +930,12 @@ impl KovaWindow {
                         }
                     }
                 } else {
-                    // Click in pane area — dismiss context menu, start text selection
+                    // Click in pane area — dismiss context menu, switch focus, start text selection
                     self.context_menu = None;
+                    let mut clicked_pane_id = None;
                     if let Some((pane, vp)) = self.pane_at(x as f32, y as f32) {
                         let pane_id = pane.id;
+                        clicked_pane_id = Some(pane_id);
                         let (col, abs_line) = self.mouse_to_grid(x as f32, y as f32, &vp, pane);
                         // Start text selection
                         let anchor = crate::terminal::GridPos { line: abs_line, col };
@@ -942,6 +944,19 @@ impl KovaWindow {
                             end: anchor,
                         });
                         self.text_select = Some(TextSelectState { pane_id, viewport: vp });
+                    }
+                    // Switch focus to clicked pane (after pane_at borrow is dropped)
+                    if let Some(pane_id) = clicked_pane_id {
+                        'focus: for (pi, proj) in self.projects.iter_mut().enumerate() {
+                            for (ti, tab) in proj.tabs.iter_mut().enumerate() {
+                                if tab.tree.pane(pane_id).is_some() {
+                                    self.active_project = pi;
+                                    proj.active_tab = ti;
+                                    tab.focused_pane = pane_id;
+                                    break 'focus;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1176,6 +1191,10 @@ impl KovaWindow {
         let row = ((y - oy - y_offset) / cell_h).floor().max(0.0) as usize;
         let col = col.min(term.cols.saturating_sub(1));
         let abs_line = (term.scrollback_len() as i64 - term.scroll_offset() as i64 + row as i64).max(0) as usize;
+        log::debug!(
+            "mouse_to_grid: y={:.1} bars_h={:.1} vp.y={:.1} oy={:.1} y_offset={:.1} cell_h={:.1} row={} abs_line={} sb_len={} scroll_off={}",
+            y, bars_h, vp.y, oy, y_offset, cell_h, row, abs_line, term.scrollback_len(), term.scroll_offset()
+        );
         (col, abs_line)
     }
 

@@ -633,7 +633,12 @@ impl Renderer {
 
         let has_selection = term.selection.is_some();
         let abs_line_base = if has_selection {
-            term.scrollback_len() as i64 - term.scroll_offset() as i64
+            let base = term.scrollback_len() as i64 - term.scroll_offset() as i64;
+            log::debug!(
+                "render selection: oy={:.1} y_offset={:.1} cell_h={:.1} vp.y={:.1} vp.h={:.1} sb_len={} scroll_off={} abs_line_base={}",
+                oy, y_offset, cell_h, vp.y, vp.height, term.scrollback_len(), term.scroll_offset(), base
+            );
+            base
         } else {
             0
         };

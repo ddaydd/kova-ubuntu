@@ -170,10 +170,18 @@ pub fn save(windows: &[WindowSession]) {
     match serde_json::to_string_pretty(&session) {
         Ok(json) => {
             rotate_session_backups(&path, json.as_bytes());
-            if let Err(e) = std::fs::write(&path, json) {
-                log::warn!("Failed to write session file: {}", e);
-            } else {
-                log::info!("Session saved to {} ({} window(s))", path.display(), windows.len());
+            // Atomic write: temp file + rename to avoid corruption on crash
+            let tmp = path.with_extension("json.tmp");
+            match std::fs::write(&tmp, &json) {
+                Ok(()) => {
+                    if let Err(e) = std::fs::rename(&tmp, &path) {
+                        log::warn!("Failed to rename session temp file: {}", e);
+                        let _ = std::fs::write(&path, &json);
+                    } else {
+                        log::info!("Session saved to {} ({} window(s))", path.display(), windows.len());
+                    }
+                }
+                Err(e) => log::warn!("Failed to write session temp file: {}", e),
             }
         }
         Err(e) => log::warn!("Failed to serialize session: {}", e),
@@ -293,8 +301,6 @@ pub fn load(backup: Option<usize>) -> Option<Session> {
         return None;
     };
 
-    // Remove session file after loading so a crash during restore doesn't loop
-    let _ = std::fs::remove_file(&path);
     Some(session)
 }
 

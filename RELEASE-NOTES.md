@@ -1,6 +1,36 @@
 # Kova Ubuntu — Release Notes
 
+## 2026-03-07
+
+### Fix Super+V "v" parasite (round 2 — Ctrl+Shift+V/C)
+- Le fix precedent (`event.text` au lieu de `logical_key`) ne suffit pas : sur X11/GNOME, `event.text` retourne `Some("v")` meme avec Super enfonce car Super ne modifie pas le keysym XKB
+- Cause racine probable : GNOME grab la touche Super sur X11, donc `ModifiersChanged` n'arrive pas (ou pas a temps) et le keybinding `cmd+v` ne matche pas
+- Fix : ajout de `Ctrl+Shift+V` (paste) et `Ctrl+Shift+C` (copy) comme keybindings additionnels dans `keybindings.rs` — standard Linux (gnome-terminal, kitty, alacritty)
+- Les bindings `cmd+v`/`cmd+c` restent (fonctionnent si le systeme passe Super)
+- Log de diagnostic ameliore pour tracer `super=true/false` et `text` sur les key events
+- Fichiers modifies : `keybindings.rs`, `window.rs`
+
+### Fix perte de session (4 bugs)
+- Le fichier session.json etait supprime au chargement — un crash avant la premiere sauvegarde periodique (30s) perdait toute la session
+- L'ecriture n'etait pas atomique — un crash pendant l'ecriture corrompait le fichier
+- La sauvegarde a la sortie etait dans un thread — `process::exit()` pouvait tuer le thread avant la fin de l'ecriture
+- Les fenetres etaient retirees de la map AVANT la sauvegarde — la session sauvee etait vide
+- Fix : suppression du `remove_file` au load, ecriture atomique (tmp+rename), sauvegarde synchrone, save avant remove
+- Fichiers modifies : `session.rs`, `app.rs`
+
+### Debug selection texte decalee d'une ligne (en cours)
+- La selection souris est decalee d'une ligne vers le bas
+- Ajout de logs debug dans `mouse_to_grid` et `build_vertices` pour diagnostic
+- En attente des valeurs de log pour identifier la cause
+- Fichiers modifies : `window.rs`, `renderer/mod.rs`
+
 ## 2026-03-06
+
+### Fix clic pour changer de terminal en vue grille
+- Cliquer sur un terminal dans la grille (multi-tabs) ne changeait plus le focus
+- Regression introduite par l'ajout de la selection texte a la souris : le clic demarrait la selection mais ne mettait plus a jour `active_tab` / `focused_pane`
+- Fix : apres le hit-test du pane clique, on met a jour `active_project`, `active_tab` et `focused_pane`
+- Fichier modifie : `window.rs` (handler MouseInput Left Pressed, zone pane)
 
 ### Fix Super+V colle un "v" parasite
 - Super+V envoyait le caractere "v" au PTY en plus du contenu colle

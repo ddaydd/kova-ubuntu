@@ -89,10 +89,7 @@ impl App {
             .map(|w| w.session_data())
             .collect();
         if !sessions.is_empty() {
-            let sessions_clone = sessions;
-            std::thread::spawn(move || {
-                crate::session::save(&sessions_clone);
-            });
+            crate::session::save(&sessions);
         }
     }
 }
@@ -113,10 +110,12 @@ impl ApplicationHandler for App {
     ) {
         // Handle new-window request from child
         if let WindowEvent::Destroyed = &event {
-            // winit sends Destroyed after close — remove from map
+            // Save session while window data is still available
+            if self.windows.contains_key(&window_id) {
+                self.save_session();
+            }
             self.windows.remove(&window_id);
             if self.windows.is_empty() {
-                self.save_session();
                 crate::terminal::pty::shutdown_all();
                 event_loop.exit();
             }
@@ -131,10 +130,9 @@ impl ApplicationHandler for App {
         match action {
             WindowAction::None => {}
             WindowAction::CloseWindow => {
-                // Save session data before closing
+                self.save_session();
                 self.windows.remove(&window_id);
                 if self.windows.is_empty() {
-                    self.save_session();
                     crate::terminal::pty::shutdown_all();
                     event_loop.exit();
                 }
@@ -183,15 +181,16 @@ impl ApplicationHandler for App {
                 }
             }
 
-            for id in dead_windows {
-                self.windows.remove(&id);
+            if !dead_windows.is_empty() {
+                // Save session while all windows (including dying ones) are still in the map
+                self.save_session();
+                for id in dead_windows {
+                    self.windows.remove(&id);
+                }
             }
 
             if self.windows.is_empty() {
-                self.save_session();
                 crate::terminal::pty::shutdown_all();
-                // We can't call event_loop.exit() here since we don't have it
-                // Instead rely on the main loop to detect empty windows
                 std::process::exit(0);
             }
 
