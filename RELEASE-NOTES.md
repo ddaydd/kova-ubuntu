@@ -2,6 +2,11 @@
 
 ## v1.2.0 — 2026-03-07
 
+### Onglet "All" permanent dans la project bar
+- L'onglet "All" apparaît automatiquement dans la project bar dès qu'il y a 2+ projets
+- Cliquer dessus toggle la vue grille de tous les terminaux
+- Se désactive automatiquement quand il ne reste qu'un seul projet
+
 ### Fix Super+V "v" parasite (round 2 — Ctrl+Shift+V/C)
 - Le fix precedent (`event.text` au lieu de `logical_key`) ne suffit pas : sur X11/GNOME, `event.text` retourne `Some("v")` meme avec Super enfonce car Super ne modifie pas le keysym XKB
 - Cause racine probable : GNOME grab la touche Super sur X11, donc `ModifiersChanged` n'arrive pas (ou pas a temps) et le keybinding `cmd+v` ne matche pas
