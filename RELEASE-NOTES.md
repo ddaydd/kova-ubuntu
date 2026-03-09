@@ -1,6 +1,20 @@
 # Kova Linux — Release Notes
 
-## 2026-03-09
+## v1.4.0 — 2026-03-09
+
+### Notification de fin de commande (OSC 133)
+- Détecte début/fin de commande via OSC 133;C/D (FinalTerm shell integration)
+- Si la commande a duré > 5s → notification système (`notify-send`) + toast in-app
+- Seuil configurable : `terminal.notify_threshold_secs` (0 = désactivé)
+- Notifications envoyées même quand la fenêtre est focused
+- Shell integration bash ajoutée dans `~/.bashrc` (OSC 133 + OSC 7 + OSC 7777)
+
+### v1.3.0 — Améliorations CLI et logs
+- Flag `--version` / `-V` ajouté
+- Version affichée dans `--help` et overlay F1
+- Fichier log en mode append (ne s'écrase plus au redémarrage)
+- Version loggée au démarrage
+- Bell notification envoyée même fenêtre focused (suppression du check `!window_focused`)
 
 ### Toast in-app (F2 Save Session)
 - Affiche "Session saved" en bas-centre de l'écran pendant 2s avec fade out
