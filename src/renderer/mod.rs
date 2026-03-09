@@ -1185,8 +1185,9 @@ impl Renderer {
         // Title bar background
         Self::push_bg_quad(vertices, 0.0, start_y, viewport_w, cell_h, [0.15, 0.15, 0.2]);
 
-        // Title
-        self.render_status_text(vertices, "Keyboard Shortcuts", start_x, start_y, max_x, title_fg, no_bg);
+        // Title with version
+        let title = format!("Kova v{} — Keyboard Shortcuts", env!("CARGO_PKG_VERSION"));
+        self.render_status_text(vertices, &title, start_x, start_y, max_x, title_fg, no_bg);
 
         // Escape hint on the right
         let hint = "Escape to close";

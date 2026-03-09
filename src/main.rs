@@ -29,7 +29,11 @@ fn log_dir() -> PathBuf {
 fn setup_logging() {
     let dir = log_dir();
     fs::create_dir_all(&dir).expect("cannot create log dir");
-    let log_file = fs::File::create(dir.join("kova.log")).expect("cannot create log file");
+    let log_file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("kova.log"))
+        .expect("cannot create log file");
 
     let level = std::env::var("RUST_LOG")
         .ok()
@@ -54,8 +58,13 @@ fn setup_logging() {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("Kova {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("Kova — Fast GPU-accelerated terminal");
+        println!("Kova {} — Fast GPU-accelerated terminal", env!("CARGO_PKG_VERSION"));
         println!();
         println!("Usage: kova [OPTIONS] [DIRECTORY]");
         println!();
@@ -94,6 +103,7 @@ fn main() {
         .and_then(|w| w[1].parse::<usize>().ok());
 
     setup_logging();
+    log::info!("Kova v{} starting", env!("CARGO_PKG_VERSION"));
 
     std::panic::set_hook(Box::new(|info| {
         log::error!("PANIC: {}", info);

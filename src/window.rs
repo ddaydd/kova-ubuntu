@@ -373,8 +373,12 @@ impl KovaWindow {
                 }
             }
         }
-        if new_bell && !self.window_focused && self.notify_cooldown == 0 {
+        if new_bell {
+            log::info!("new_bell=true, window_focused={}, notify_cooldown={}", self.window_focused, self.notify_cooldown);
+        }
+        if new_bell && self.notify_cooldown == 0 {
             self.notify_cooldown = self.config.terminal.fps * 5; // 5s cooldown
+            log::info!("Sending notify-send for bell");
             std::process::Command::new("notify-send")
                 .args(["--app-name=Kova", "-i", "utilities-terminal", "Kova", "Bell received"])
                 .spawn()
@@ -584,6 +588,7 @@ impl KovaWindow {
             }
 
             WindowEvent::Focused(focused) => {
+                log::info!("Window focused: {}", focused);
                 self.window_focused = *focused;
             }
 
