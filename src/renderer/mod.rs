@@ -336,6 +336,7 @@ impl Renderer {
         hidden_right: usize,
         drag_label: Option<(&str, f32, f32)>,
         context_menu: Option<(f32, f32, bool, Option<u8>)>,
+        toast: Option<(&str, u32)>,
     ) {
         // Reset blink on cursor movement
         if let Some((term, _, _, _, _, _)) = panes.iter().find(|(_, _, _, focused, _, _)| *focused) {
@@ -400,7 +401,8 @@ impl Renderer {
         let all_ready = !any_not_ready;
         let has_filter = filter.is_some();
         let is_dragging = drag_label.is_some();
-        if all_ready && !any_dirty && !any_sync_deferred && !blink_changed && !minute_changed && !has_filter && !show_help && help_hint_frames == 0 && !is_dragging {
+        let has_toast = toast.is_some();
+        if all_ready && !any_dirty && !any_sync_deferred && !blink_changed && !minute_changed && !has_filter && !show_help && help_hint_frames == 0 && !is_dragging && !has_toast {
             return;
         }
 
@@ -520,6 +522,11 @@ impl Renderer {
         // Startup help hint
         if help_hint_frames > 0 && !show_help {
             self.build_help_hint_vertices(&mut all_vertices, viewport_w, viewport_h, help_hint_frames);
+        }
+
+        // Toast notification
+        if let Some((msg, frames_left)) = toast {
+            self.build_toast_vertices(&mut all_vertices, viewport_w, viewport_h, msg, frames_left);
         }
 
         // Update uniforms
@@ -1294,6 +1301,41 @@ impl Renderer {
         let sub_y = title_y + cell_h + 4.0;
         let sub_fg = [0.6, 0.6, 0.6, text_alpha];
         self.render_status_text(vertices, subtitle, sub_x, sub_y, viewport_w, sub_fg, no_bg);
+    }
+
+    fn build_toast_vertices(&mut self, vertices: &mut Vec<Vertex>, viewport_w: f32, viewport_h: f32, msg: &str, frames_left: u32) {
+        let cell_w = self.atlas.cell_width;
+        let cell_h = self.atlas.cell_height;
+        let pad_x = cell_w * 1.5;
+        let pad_y = 6.0;
+        let pill_w = msg.chars().count() as f32 * cell_w + pad_x * 2.0;
+        let pill_h = cell_h + pad_y * 2.0;
+        let pill_x = (viewport_w - pill_w) / 2.0;
+        let pill_y = viewport_h - pill_h - cell_h * 2.0;
+
+        // Fade out during the last 20 frames
+        let alpha = if frames_left < 20 {
+            frames_left as f32 / 20.0 * 0.85
+        } else {
+            0.85
+        };
+
+        let pill_bg = [0.15, 0.15, 0.18, alpha];
+        let no_tex = [0.0_f32, 0.0];
+        let white = [1.0_f32, 1.0, 1.0, 0.0];
+        vertices.push(Vertex { position: [pill_x, pill_y], tex_coords: no_tex, color: white, bg_color: pill_bg });
+        vertices.push(Vertex { position: [pill_x + pill_w, pill_y], tex_coords: no_tex, color: white, bg_color: pill_bg });
+        vertices.push(Vertex { position: [pill_x, pill_y + pill_h], tex_coords: no_tex, color: white, bg_color: pill_bg });
+        vertices.push(Vertex { position: [pill_x + pill_w, pill_y], tex_coords: no_tex, color: white, bg_color: pill_bg });
+        vertices.push(Vertex { position: [pill_x + pill_w, pill_y + pill_h], tex_coords: no_tex, color: white, bg_color: pill_bg });
+        vertices.push(Vertex { position: [pill_x, pill_y + pill_h], tex_coords: no_tex, color: white, bg_color: pill_bg });
+
+        let text_alpha = if frames_left < 20 { frames_left as f32 / 20.0 } else { 1.0 };
+        let no_bg = [0.0, 0.0, 0.0, 0.0];
+        let text_x = pill_x + pad_x;
+        let text_y = pill_y + pad_y;
+        let text_fg = [0.9, 0.9, 0.9, text_alpha];
+        self.render_status_text(vertices, msg, text_x, text_y, viewport_w, text_fg, no_bg);
     }
 
     fn build_loading_vertices(&mut self, vp: &PaneViewport) -> Vec<Vertex> {

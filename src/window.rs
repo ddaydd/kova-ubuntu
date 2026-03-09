@@ -102,6 +102,13 @@ pub struct KovaWindow {
     text_select: Option<TextSelectState>,
     /// Context menu (right-click).
     context_menu: Option<ContextMenu>,
+    /// Toast notification (frames remaining + message).
+    toast_frames: u32,
+    toast_text: String,
+    /// Whether the window currently has OS focus.
+    window_focused: bool,
+    /// Cooldown frames before next system notification (avoids spam).
+    notify_cooldown: u32,
 }
 
 impl KovaWindow {
@@ -200,6 +207,10 @@ impl KovaWindow {
             show_all: false,
             text_select: None,
             context_menu: None,
+            toast_frames: 0,
+            toast_text: String::new(),
+            window_focused: true,
+            notify_cooldown: 0,
         };
 
         // Initial resize + first render, then show window
@@ -216,6 +227,12 @@ impl KovaWindow {
 
     pub fn request_redraw(&self) {
         self.window.request_redraw();
+    }
+
+    pub fn show_toast(&mut self, msg: &str) {
+        let fps = self.config.terminal.fps;
+        self.toast_text = msg.to_string();
+        self.toast_frames = fps * 2; // 2 seconds
     }
 
     // --- Project/Tab helpers ---
@@ -344,15 +361,34 @@ impl KovaWindow {
         }
 
         // Check bells
+        if self.notify_cooldown > 0 {
+            self.notify_cooldown -= 1;
+        }
+        let mut new_bell = false;
         for proj in &mut self.projects {
             for tab in &mut proj.tabs {
-                tab.check_bell();
+                let had_bell = tab.has_bell;
+                if tab.check_bell() && !had_bell {
+                    new_bell = true;
+                }
             }
+        }
+        if new_bell && !self.window_focused && self.notify_cooldown == 0 {
+            self.notify_cooldown = self.config.terminal.fps * 5; // 5s cooldown
+            std::process::Command::new("notify-send")
+                .args(["--app-name=Kova", "-i", "utilities-terminal", "Kova", "Bell received"])
+                .spawn()
+                .ok();
         }
 
         // Help hint countdown
         if self.help_hint_frames > 0 {
             self.help_hint_frames -= 1;
+        }
+
+        // Toast countdown
+        if self.toast_frames > 0 {
+            self.toast_frames -= 1;
         }
 
         // Render
@@ -524,6 +560,7 @@ impl KovaWindow {
             0,
             drag_ref,
             ctx_menu,
+            if self.toast_frames > 0 { Some((self.toast_text.as_str(), self.toast_frames)) } else { None },
         );
     }
 
@@ -544,6 +581,10 @@ impl KovaWindow {
                     self.renderer.rebuild_atlas(&self.device, &self.queue, *scale_factor);
                     self.resize_all_panes();
                 }
+            }
+
+            WindowEvent::Focused(focused) => {
+                self.window_focused = *focused;
             }
 
             WindowEvent::CloseRequested => {

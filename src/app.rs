@@ -140,6 +140,9 @@ impl ApplicationHandler for App {
             WindowAction::SaveSession => {
                 self.save_session();
                 log::info!("Session saved manually");
+                if let Some(win) = self.windows.get_mut(&window_id) {
+                    win.show_toast("Session saved");
+                }
             }
             WindowAction::NewWindow => {
                 let tab =

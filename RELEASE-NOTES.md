@@ -1,5 +1,16 @@
 # Kova Linux — Release Notes
 
+## 2026-03-09
+
+### Toast in-app (F2 Save Session)
+- Affiche "Session saved" en bas-centre de l'écran pendant 2s avec fade out
+- Système générique `show_toast(msg)` réutilisable pour d'autres actions
+
+### Notifications système (BEL)
+- Quand un pane reçoit un BEL (`\a`) et que la fenêtre Kova n'a pas le focus → notification desktop via `notify-send`
+- Cooldown de 5s pour éviter le spam
+- Utile pour être notifié quand Claude Code termine une tâche
+
 ## v1.2.0 — 2026-03-07
 
 ### Onglet "All" permanent dans la project bar
