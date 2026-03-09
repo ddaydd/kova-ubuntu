@@ -146,6 +146,30 @@ impl Perform for VteHandler {
                         term.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
+                b"133" => {
+                    // FinalTerm shell integration (OSC 133)
+                    // A = prompt start, B = command start, C = command output, D = command finished
+                    match params[1] {
+                        b"C" => {
+                            // Command output begins — record start time
+                            *self.term().command_start.lock() = Some(std::time::Instant::now());
+                            log::debug!("OSC 133;C: command output start");
+                        }
+                        b"D" => {
+                            // Command finished — compute elapsed time
+                            let start = self.term().command_start.lock().take();
+                            if let Some(start) = start {
+                                let elapsed = start.elapsed();
+                                let term = self.term();
+                                let cmd = term.last_command.clone();
+                                log::debug!("OSC 133;D: command finished in {:?}, cmd={:?}", elapsed, cmd);
+                                *term.command_completion.lock() = Some((elapsed, cmd));
+                                term.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 b"7777" => {
                     // Shell integration: preexec hook sends the command being executed
                     let command = String::from_utf8_lossy(params[1]).into_owned();

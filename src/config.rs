@@ -48,6 +48,8 @@ pub struct TerminalConfig {
     pub fps: u32,
     pub cursor_blink_frames: u32,
     pub scroll_sensitivity: f64,
+    /// Notify when a command takes longer than this many seconds (0 = disabled)
+    pub notify_threshold_secs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -179,6 +181,7 @@ impl Default for TerminalConfig {
             fps: 60,
             cursor_blink_frames: 60,
             scroll_sensitivity: 6.0,
+            notify_threshold_secs: 5,
         }
     }
 }

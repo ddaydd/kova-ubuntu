@@ -140,6 +140,10 @@ pub struct TerminalState {
     pub bell: AtomicBool,
     // Last command executed (set via OSC 7777 from shell integration)
     pub last_command: Option<String>,
+    // Command completion tracking (OSC 133 shell integration)
+    // Mutex allows access from both parser (write lock) and window (read lock)
+    command_start: parking_lot::Mutex<Option<Instant>>,
+    pub command_completion: parking_lot::Mutex<Option<(std::time::Duration, Option<String>)>>,
 }
 
 /// A single line matching a filter query.
@@ -195,6 +199,8 @@ impl TerminalState {
             insert_mode: false,
             bell: AtomicBool::new(false),
             last_command: None,
+            command_start: parking_lot::Mutex::new(None),
+            command_completion: parking_lot::Mutex::new(None),
         }
     }
 

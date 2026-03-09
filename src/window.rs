@@ -385,6 +385,36 @@ impl KovaWindow {
                 .ok();
         }
 
+        // Check command completions (OSC 133 shell integration)
+        let threshold = self.config.terminal.notify_threshold_secs;
+        if threshold > 0 {
+            let mut notify_msg = None;
+            for proj in &self.projects {
+                for tab in &proj.tabs {
+                    tab.tree.for_each_pane(&mut |pane| {
+                        if let Some((elapsed, cmd)) = pane.terminal.read().command_completion.lock().take() {
+                            if elapsed.as_secs() >= threshold {
+                                let msg = if let Some(c) = cmd {
+                                    format!("'{}' finished ({}s)", c, elapsed.as_secs())
+                                } else {
+                                    format!("Command finished ({}s)", elapsed.as_secs())
+                                };
+                                notify_msg = Some(msg);
+                            }
+                        }
+                    });
+                }
+            }
+            if let Some(msg) = notify_msg {
+                log::info!("Command completion: {}", msg);
+                std::process::Command::new("notify-send")
+                    .args(["--app-name=Kova", "-i", "utilities-terminal", "Kova", &msg])
+                    .spawn()
+                    .ok();
+                self.show_toast(&msg);
+            }
+        }
+
         // Help hint countdown
         if self.help_hint_frames > 0 {
             self.help_hint_frames -= 1;
