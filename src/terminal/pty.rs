@@ -194,6 +194,36 @@ impl Pty {
             .map(|s| s.trim().to_string())
     }
 
+    /// Returns the foreground process group ID (if different from child shell).
+    pub fn foreground_pgid(&self) -> Option<i32> {
+        let fg_pgid = unsafe { libc::tcgetpgrp(self.master_fd.as_raw_fd()) };
+        if fg_pgid <= 0 || fg_pgid == self.child_pid as i32 {
+            None
+        } else {
+            Some(fg_pgid)
+        }
+    }
+
+    /// Returns true if the foreground process looks like Claude Code.
+    /// Checks /proc/<pid>/cmdline for "claude" in the executable name.
+    pub fn is_claude(&self) -> bool {
+        let Some(fg_pgid) = self.foreground_pgid() else {
+            return false;
+        };
+        // Read the full command line (NUL-separated args)
+        if let Ok(data) = std::fs::read(format!("/proc/{}/cmdline", fg_pgid)) {
+            // First arg (argv[0]) is the executable
+            if let Some(argv0) = data.split(|&b| b == 0).next() {
+                let s = String::from_utf8_lossy(argv0);
+                // Match "claude" anywhere in argv[0] path (e.g. /home/user/.nvm/.../claude)
+                if let Some(basename) = s.rsplit('/').next() {
+                    return basename == "claude";
+                }
+            }
+        }
+        false
+    }
+
     /// Returns the current working directory of the child shell process.
     /// On Linux, reads /proc/<pid>/cwd symlink.
     pub fn cwd(&self) -> Option<String> {

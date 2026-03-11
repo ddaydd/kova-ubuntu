@@ -20,6 +20,19 @@ struct FilterState {
     matches: Vec<FilterMatch>,
 }
 
+/// View mode for the project bar: show a single project, all panes, or filtered views.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ViewMode {
+    /// Normal mode: show active project's tabs.
+    Project,
+    /// Show all panes from all projects.
+    All,
+    /// Show only panes running Claude Code.
+    Claude,
+    /// Show only panes that are NOT running Claude Code.
+    Terminal,
+}
+
 struct RenameTabState {
     input: String,
 }
@@ -96,8 +109,8 @@ pub struct KovaWindow {
     git_poll_interval: u32,
     /// Frames remaining to show the "F1 for help" hint at startup.
     help_hint_frames: u32,
-    /// Show all terminals from all projects in a grid.
-    show_all: bool,
+    /// View mode: Project (normal), All, Claude, or Terminal.
+    view_mode: ViewMode,
     /// Mouse text selection state.
     text_select: Option<TextSelectState>,
     /// Context menu (right-click).
@@ -204,7 +217,7 @@ impl KovaWindow {
             git_poll_counter: 0,
             git_poll_interval: fps * 2,
             help_hint_frames: fps * 3,
-            show_all: false,
+            view_mode: ViewMode::Project,
             text_select: None,
             context_menu: None,
             toast_frames: 0,
@@ -446,27 +459,21 @@ impl KovaWindow {
 
         let (_, cell_h) = self.renderer.cell_size();
         let project_bar_h = (cell_h * 1.5).round();
-        let tab_bar_h = if self.show_all { 0.0 } else { (cell_h * 2.0).round() };
+        let tab_bar_h = if self.is_grid_view() { 0.0 } else { (cell_h * 2.0).round() };
         let global_bar_h = cell_h;
         let bars_h = project_bar_h + tab_bar_h;
         let pane_area_y = bars_h;
         let pane_area_h = viewport_h - bars_h - global_bar_h;
 
-        // Collect tabs: all projects in show_all mode, or just active project
-        let all_tabs: Vec<(&Tab, bool)> = if self.show_all {
-            let active_proj = &self.projects[self.active_project];
-            let active_tab_id = active_proj.tabs.get(active_proj.active_tab).map(|t| t.id);
-            self.projects.iter().flat_map(|p| {
-                p.tabs.iter().map(move |t| (t, Some(t.id) == active_tab_id))
-            }).collect()
-        } else {
-            let proj = &self.projects[self.active_project];
-            proj.tabs.iter().enumerate().map(|(i, t)| {
-                (t, i == proj.active_tab)
-            }).collect()
-        };
+        // Collect tabs based on view mode
+        let all_tabs: Vec<(&Tab, bool)> = self.visible_tabs();
 
         if all_tabs.is_empty() {
+            // Filter mode has no matches — fall back to Project mode
+            if self.view_mode != ViewMode::Project {
+                self.view_mode = ViewMode::Project;
+                return;
+            }
             return;
         }
 
@@ -518,23 +525,29 @@ impl KovaWindow {
             tab.tree.collect_separators(tab_vp, &mut separators);
         }
 
-        // Project titles: prepend "All" entry when there are 2+ projects
-        let has_all_tab = self.projects.len() >= 2;
+        // Project titles: prepend filter tabs (All, Claude, Terminal) then projects
+        let has_filter_tabs = self.projects.len() >= 2;
+        let has_claude = self.has_any_claude_pane();
         let mut project_titles: Vec<(String, bool)> = Vec::new();
-        if has_all_tab {
-            project_titles.push(("All".to_string(), self.show_all));
+        if has_filter_tabs {
+            project_titles.push(("All".to_string(), self.view_mode == ViewMode::All));
+            if has_claude {
+                project_titles.push(("Claude".to_string(), self.view_mode == ViewMode::Claude));
+                project_titles.push(("Terminal".to_string(), self.view_mode == ViewMode::Terminal));
+            }
         }
+        let filter_offset = project_titles.len();
         project_titles.extend(self.projects.iter().enumerate().map(|(i, p)| {
             let name = if self.rename_project.as_ref().is_some_and(|r| r.project_idx == i) {
                 format!("{}|", self.rename_project.as_ref().unwrap().input)
             } else {
                 p.name()
             };
-            (name, !self.show_all && i == self.active_project)
+            (name, self.view_mode == ViewMode::Project && i == self.active_project)
         }));
 
-        // Tab titles (hidden in show_all mode)
-        let tab_titles: Vec<(String, bool, Option<usize>, bool, bool)> = if self.show_all {
+        // Tab titles (hidden in grid view modes)
+        let tab_titles: Vec<(String, bool, Option<usize>, bool, bool)> = if self.is_grid_view() {
             Vec::new()
         } else {
             let proj = &self.projects[self.active_project];
@@ -798,7 +811,11 @@ impl KovaWindow {
                         Action::MoveTabToPrevProject => self.do_move_tab_to_project(-1),
                         Action::ShowAllTerminals => {
                             if self.projects.len() >= 2 {
-                                self.show_all = !self.show_all;
+                                self.view_mode = if self.view_mode == ViewMode::All {
+                                    ViewMode::Project
+                                } else {
+                                    ViewMode::All
+                                };
                                 self.resize_all_panes();
                             }
                         }
@@ -942,25 +959,41 @@ impl KovaWindow {
                     // Click in project bar
                     let viewport_w = self.surface_config.width as f64;
                     let max_proj_w = cell_w as f64 * 20.0;
-                    let has_all_tab = self.projects.len() >= 2;
-                    let all_offset: usize = if has_all_tab { 1 } else { 0 };
-                    let slot_count = all_offset + self.projects.len() + 1; // [All] + projects + "+"
+                    let has_filter_tabs = self.projects.len() >= 2;
+                    let has_claude = self.has_any_claude_pane();
+                    // Filter slots: [All] [Claude] [Terminal] (Claude+Terminal only if claude panes exist)
+                    let filter_count: usize = if has_filter_tabs {
+                        if has_claude { 3 } else { 1 }
+                    } else {
+                        0
+                    };
+                    let slot_count = filter_count + self.projects.len() + 1;
                     let proj_width = (viewport_w / slot_count as f64).min(max_proj_w);
                     let clicked = (x / proj_width) as usize;
-                    if has_all_tab && clicked == 0 {
-                        // Toggle show_all
-                        self.show_all = !self.show_all;
+                    if has_filter_tabs && clicked < filter_count {
+                        // Clicked a filter tab
+                        let filter_modes = if has_claude {
+                            vec![ViewMode::All, ViewMode::Claude, ViewMode::Terminal]
+                        } else {
+                            vec![ViewMode::All]
+                        };
+                        let target = filter_modes[clicked];
+                        self.view_mode = if self.view_mode == target {
+                            ViewMode::Project
+                        } else {
+                            target
+                        };
                         self.resize_all_panes();
-                    } else if clicked >= all_offset && clicked < all_offset + self.projects.len() {
+                    } else if clicked >= filter_count && clicked < filter_count + self.projects.len() {
                         // Switch to specific project
-                        self.show_all = false;
-                        self.active_project = clicked - all_offset;
+                        self.view_mode = ViewMode::Project;
+                        self.active_project = clicked - filter_count;
                         self.resize_all_panes();
                     } else {
                         // "+" button
                         self.do_new_project();
                     }
-                } else if !self.show_all && (y as f32) < project_bar_h + tab_bar_h {
+                } else if !self.is_grid_view() && (y as f32) < project_bar_h + tab_bar_h {
                     // Click in tab bar (not visible in show_all mode)
                     let viewport_w = self.surface_config.width as f64;
                     let max_tab_w = cell_w as f64 * 20.0;
@@ -1037,13 +1070,18 @@ impl KovaWindow {
                         if (y as f32) < project_bar_h {
                             let viewport_w = self.surface_config.width as f64;
                             let max_proj_w = cell_w as f64 * 20.0;
-                            let has_all_tab = self.projects.len() >= 2;
-                            let all_offset: usize = if has_all_tab { 1 } else { 0 };
-                            let slot_count = all_offset + self.projects.len() + 1;
+                            let has_filter_tabs = self.projects.len() >= 2;
+                            let has_claude = self.has_any_claude_pane();
+                            let filter_count: usize = if has_filter_tabs {
+                                if has_claude { 3 } else { 1 }
+                            } else {
+                                0
+                            };
+                            let slot_count = filter_count + self.projects.len() + 1;
                             let proj_width = (viewport_w / slot_count as f64).min(max_proj_w);
                             let clicked = (x / proj_width) as usize;
-                            // slot 0 = "All" when present (ignore drop), then projects
-                            let target_proj = if clicked >= all_offset { clicked - all_offset } else { usize::MAX };
+                            // Filter slots are not valid drop targets
+                            let target_proj = if clicked >= filter_count { clicked - filter_count } else { usize::MAX };
 
                             if target_proj < self.projects.len() && target_proj != drag.src_project {
                                 // Move tab from src to target project
@@ -1055,7 +1093,7 @@ impl KovaWindow {
                                 if src.tabs.is_empty() {
                                     self.projects.remove(drag.src_project);
                                     if self.projects.len() < 2 {
-                                        self.show_all = false;
+                                        self.view_mode = ViewMode::Project;
                                     }
                                     // Adjust target index if source was before target
                                     let adjusted_target = if drag.src_project < target_proj {
@@ -1095,13 +1133,18 @@ impl KovaWindow {
                     // Right-click on project bar → rename project
                     let viewport_w = self.surface_config.width as f64;
                     let max_proj_w = cell_w as f64 * 20.0;
-                    let has_all_tab = self.projects.len() >= 2;
-                    let all_offset: usize = if has_all_tab { 1 } else { 0 };
-                    let slot_count = all_offset + self.projects.len() + 1;
+                    let has_filter_tabs = self.projects.len() >= 2;
+                    let has_claude = self.has_any_claude_pane();
+                    let filter_count: usize = if has_filter_tabs {
+                        if has_claude { 3 } else { 1 }
+                    } else {
+                        0
+                    };
+                    let slot_count = filter_count + self.projects.len() + 1;
                     let proj_width = (viewport_w / slot_count as f64).min(max_proj_w);
                     let clicked = (x / proj_width) as usize;
-                    if clicked >= all_offset && clicked < all_offset + self.projects.len() {
-                        let idx = clicked - all_offset;
+                    if clicked >= filter_count && clicked < filter_count + self.projects.len() {
+                        let idx = clicked - filter_count;
                         let current = self.projects[idx].name();
                         self.rename_project = Some(RenameProjectState {
                             project_idx: idx,
@@ -1170,6 +1213,52 @@ impl KovaWindow {
         WindowAction::None
     }
 
+    /// Whether the current view mode shows a grid of all/filtered tabs
+    /// (as opposed to a single project's tabs).
+    fn is_grid_view(&self) -> bool {
+        self.view_mode != ViewMode::Project
+    }
+
+    /// Collect visible tabs based on the current view mode.
+    /// Returns tabs with their active status.
+    fn visible_tabs(&self) -> Vec<(&Tab, bool)> {
+        let active_proj = &self.projects[self.active_project];
+        let active_tab_id = active_proj.tabs.get(active_proj.active_tab).map(|t| t.id);
+
+        match self.view_mode {
+            ViewMode::Project => {
+                let proj = &self.projects[self.active_project];
+                proj.tabs.iter().enumerate().map(|(i, t)| {
+                    (t, i == proj.active_tab)
+                }).collect()
+            }
+            ViewMode::All => {
+                self.projects.iter().flat_map(|p| {
+                    p.tabs.iter().map(move |t| (t, Some(t.id) == active_tab_id))
+                }).collect()
+            }
+            ViewMode::Claude => {
+                self.projects.iter().flat_map(|p| {
+                    p.tabs.iter().filter(|t| t.tree.any_pane(&|pane| pane.is_claude()))
+                        .map(move |t| (t, Some(t.id) == active_tab_id))
+                }).collect()
+            }
+            ViewMode::Terminal => {
+                self.projects.iter().flat_map(|p| {
+                    p.tabs.iter().filter(|t| t.tree.any_pane(&|pane| !pane.is_claude()))
+                        .map(move |t| (t, Some(t.id) == active_tab_id))
+                }).collect()
+            }
+        }
+    }
+
+    /// Check if any pane across all projects is running Claude Code.
+    fn has_any_claude_pane(&self) -> bool {
+        self.projects.iter().any(|p| {
+            p.tabs.iter().any(|t| t.tree.any_pane(&|pane| pane.is_claude()))
+        })
+    }
+
     fn focused_pane(&self) -> Option<&Pane> {
         let proj = self.projects.get(self.active_project)?;
         let tab = proj.tabs.get(proj.active_tab)?;
@@ -1184,19 +1273,14 @@ impl KovaWindow {
         let viewport_h = size.height as f32;
         let (_, cell_h) = self.renderer.cell_size();
         let project_bar_h = (cell_h * 1.5).round();
-        let tab_bar_h = if self.show_all { 0.0 } else { (cell_h * 2.0).round() };
+        let tab_bar_h = if self.is_grid_view() { 0.0 } else { (cell_h * 2.0).round() };
         let global_bar_h = cell_h;
         let bars_h = project_bar_h + tab_bar_h;
         let pane_area_h = viewport_h - bars_h - global_bar_h;
         let local_y = y - bars_h;
         if local_y < 0.0 { return None; }
 
-        let tabs: Vec<&Tab> = if self.show_all {
-            self.projects.iter().flat_map(|p| p.tabs.iter()).collect()
-        } else {
-            let proj = self.projects.get(self.active_project)?;
-            proj.tabs.iter().collect()
-        };
+        let tabs: Vec<&Tab> = self.visible_tabs().into_iter().map(|(t, _)| t).collect();
         let tab_count = tabs.len();
         let (grid_cols, grid_rows) = if tab_count <= 1 {
             (1usize, 1usize)
@@ -1229,7 +1313,7 @@ impl KovaWindow {
         let (cell_w, cell_h) = self.renderer.cell_size();
         let bars_h = {
             let project_bar_h = (cell_h * 1.5).round();
-            let tab_bar_h = if self.show_all { 0.0 } else { (cell_h * 2.0).round() };
+            let tab_bar_h = if self.is_grid_view() { 0.0 } else { (cell_h * 2.0).round() };
             project_bar_h + tab_bar_h
         };
         let ox = vp.x + crate::renderer::PANE_H_PADDING;
@@ -1296,7 +1380,7 @@ impl KovaWindow {
 
         let (cell_w, cell_h) = self.renderer.cell_size();
         let project_bar_h = (cell_h * 1.5).round();
-        let tab_bar_h = if self.show_all { 0.0 } else { (cell_h * 2.0).round() };
+        let tab_bar_h = if self.is_grid_view() { 0.0 } else { (cell_h * 2.0).round() };
         let global_bar_h = cell_h;
         let status_bar_h = if self.renderer.status_bar_enabled() {
             cell_h
@@ -1307,14 +1391,10 @@ impl KovaWindow {
         let pane_area_h = viewport_h - bars_h - global_bar_h;
 
         // Collect tabs to resize
-        let tabs_to_resize: Vec<&Tab> = if self.show_all {
-            self.projects.iter().flat_map(|p| p.tabs.iter()).collect()
-        } else {
-            match self.projects.get(self.active_project) {
-                Some(p) => p.tabs.iter().collect(),
-                None => return,
-            }
-        };
+        let tabs_to_resize: Vec<&Tab> = self.visible_tabs().into_iter().map(|(t, _)| t).collect();
+        if tabs_to_resize.is_empty() {
+            return;
+        }
 
         let tab_count = tabs_to_resize.len();
         let (grid_cols, grid_rows) = if tab_count <= 1 {
@@ -1415,7 +1495,7 @@ impl KovaWindow {
                         self.closing = true;
                     } else {
                         if self.projects.len() < 2 {
-                            self.show_all = false;
+                            self.view_mode = ViewMode::Project;
                         }
                         self.active_project = self.active_project.min(self.projects.len() - 1);
                         self.resize_all_panes();

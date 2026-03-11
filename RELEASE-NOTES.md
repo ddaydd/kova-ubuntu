@@ -1,5 +1,17 @@
 # Kova Linux — Release Notes
 
+## v1.5.0 — 2026-03-11
+
+### Détection Claude Code et filtres project bar
+- Détection automatique des panes exécutant Claude Code via `/proc/<pid>/cmdline` (basename = "claude")
+- Nouveaux onglets filtres **Claude** et **Terminal** dans la project bar (apparaissent quand un pane Claude est actif + 2 projets min)
+- **Claude** : affiche en grille uniquement les tabs contenant un pane Claude
+- **Terminal** : affiche uniquement les tabs sans pane Claude
+- Refactoring de `show_all: bool` → `ViewMode { Project, All, Claude, Terminal }` enum
+- Auto-fallback vers le mode Project si le filtre ne matche plus rien
+- `Pty::is_claude()`, `Pane::is_claude()`, `SplitTree::any_pane()` ajoutés
+- `visible_tabs()` et `is_grid_view()` centralisent la logique de vue
+
 ## v1.4.0 — 2026-03-09
 
 ### Notification de fin de commande (OSC 133)

@@ -302,6 +302,11 @@ impl Pane {
         self.pty.foreground_process_name()
     }
 
+    /// Returns true if this pane is running Claude Code.
+    pub fn is_claude(&self) -> bool {
+        self.pty.is_claude()
+    }
+
     pub fn is_alive(&self) -> bool {
         !self.shell_exited.load(Ordering::Relaxed)
     }
@@ -402,6 +407,17 @@ impl SplitTree {
             | SplitTree::VSplit { top: left, bottom: right, .. } => {
                 left.for_each_pane(f);
                 right.for_each_pane(f);
+            }
+        }
+    }
+
+    /// Returns true if any pane in this tree matches the predicate.
+    pub fn any_pane(&self, f: &dyn Fn(&Pane) -> bool) -> bool {
+        match self {
+            SplitTree::Leaf(p) => f(p),
+            SplitTree::HSplit { left, right, .. }
+            | SplitTree::VSplit { top: left, bottom: right, .. } => {
+                left.any_pane(f) || right.any_pane(f)
             }
         }
     }
