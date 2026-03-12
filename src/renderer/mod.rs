@@ -838,6 +838,11 @@ impl Renderer {
             self.render_status_text(vertices, &indicator, center_x, bar_y, viewport_w, scroll_fg, no_bg);
         }
 
+        // Version label (left)
+        let version_label = format!("Kova v{}", env!("CARGO_PKG_VERSION"));
+        let version_fg = [self.global_bar_time_color[0], self.global_bar_time_color[1], self.global_bar_time_color[2], 0.5];
+        self.render_status_text(vertices, &version_label, cell_w, bar_y, viewport_w, version_fg, no_bg);
+
         if !self.cached_time_str.is_empty() {
             let time_str = self.cached_time_str.clone();
             let time_w = time_str.chars().count() as f32 * cell_w;
@@ -849,7 +854,7 @@ impl Renderer {
     fn build_project_sidebar_vertices(&mut self, vertices: &mut Vec<Vertex>, viewport_h: f32, project_titles: &[(String, bool)]) {
         let cell_w = self.atlas.cell_width;
         let cell_h = self.atlas.cell_height;
-        let sidebar_w = (cell_w * 12.0).round();
+        let sidebar_w = (cell_w * 36.0).round();
         let row_h = (cell_h * 1.5).round();
         let global_bar_h = cell_h;
         let sidebar_h = viewport_h - global_bar_h;
@@ -910,11 +915,6 @@ impl Renderer {
         // +1 for the "+" button slot
         let tab_width = (full_available_w / (tab_count + 1) as f32).min(max_tab_w);
 
-        let version_label = format!("Kova v{}", env!("CARGO_PKG_VERSION"));
-        let version_chars = version_label.chars().count() as f32;
-        let version_padding = cell_w * (version_chars + 2.0);
-        let tabs_right_edge = left_inset + (tab_count + 1) as f32 * tab_width;
-        let show_version = tabs_right_edge <= viewport_w - version_padding;
         let no_bg = [0.0, 0.0, 0.0, 0.0];
 
         for (i, (title, is_active, color_idx, is_renaming, has_bell)) in tab_titles.iter().enumerate() {
@@ -990,12 +990,6 @@ impl Renderer {
         let plus_text_y = y_offset + (bar_h - cell_h) / 2.0;
         self.render_status_text(vertices, "+", plus_text_x, plus_text_y, plus_x + tab_width, plus_fg, no_bg);
 
-        if show_version {
-            let version_fg = [self.tab_bar_fg[0], self.tab_bar_fg[1], self.tab_bar_fg[2], 0.5];
-            let version_x = viewport_w - version_padding + cell_w;
-            let version_y = y_offset + (bar_h - cell_h) / 2.0;
-            self.render_status_text(vertices, &version_label, version_x, version_y, viewport_w - cell_w * 0.5, version_fg, no_bg);
-        }
     }
 
     fn render_status_text(&mut self, vertices: &mut Vec<Vertex>, text: &str, start_x: f32, y: f32, max_x: f32, fg: [f32; 4], no_bg: [f32; 4]) -> f32 {
@@ -1215,7 +1209,7 @@ impl Renderer {
     fn build_context_menu_vertices(&mut self, vertices: &mut Vec<Vertex>, x: f32, y: f32, has_selection: bool, hovered: Option<u8>) {
         let cell_w = self.atlas.cell_width;
         let cell_h = self.atlas.cell_height;
-        let item_w = cell_w * 12.0;
+        let item_w = cell_w * 36.0;
         let item_h = cell_h * 1.8;
         let menu_h = item_h * 2.0;
         let pad = 4.0_f32;

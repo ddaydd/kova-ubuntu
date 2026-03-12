@@ -458,7 +458,7 @@ impl KovaWindow {
         }
 
         let (cell_w, cell_h) = self.renderer.cell_size();
-        let project_bar_w = (cell_w * 12.0).round();
+        let project_bar_w = (cell_w * 36.0).round();
         let tab_bar_h = if self.is_grid_view() { 0.0 } else { (cell_h * 2.0).round() };
         let global_bar_h = cell_h;
         let bars_h = tab_bar_h;
@@ -907,7 +907,7 @@ impl KovaWindow {
                     let mx = self.mouse_x as f32;
                     let my = self.mouse_y as f32;
                     let (cell_w, cell_h) = self.renderer.cell_size();
-                    let item_w = cell_w * 12.0;
+                    let item_w = cell_w * 36.0;
                     let item_h = cell_h * 1.8;
                     if mx >= menu.x && mx < menu.x + item_w {
                         let rel_y = my - menu.y;
@@ -937,7 +937,7 @@ impl KovaWindow {
                 if let Some(menu) = &self.context_menu {
                     let mx = x as f32;
                     let my = y as f32;
-                    let item_w = cell_w * 12.0;
+                    let item_w = cell_w * 36.0;
                     let item_h = cell_h * 1.8;
                     let mut action = None;
                     if mx >= menu.x && mx < menu.x + item_w {
@@ -952,7 +952,7 @@ impl KovaWindow {
                     return WindowAction::None;
                 }
 
-                let project_bar_w = (cell_w * 12.0).round();
+                let project_bar_w = (cell_w * 36.0).round();
                 let tab_bar_h = (cell_h * 2.0).round();
 
                 if (x as f32) < project_bar_w {
@@ -1059,7 +1059,7 @@ impl KovaWindow {
                         let x = self.mouse_x;
                         let y = self.mouse_y;
                         let (cell_w, cell_h) = self.renderer.cell_size();
-                        let project_bar_w = (cell_w * 12.0).round();
+                        let project_bar_w = (cell_w * 36.0).round();
 
                         if (x as f32) < project_bar_w {
                             let row_h = (cell_h * 1.5).round() as f64;
@@ -1118,7 +1118,7 @@ impl KovaWindow {
                 let x = self.mouse_x;
                 let y = self.mouse_y;
                 let (cell_w, cell_h) = self.renderer.cell_size();
-                let project_bar_w = (cell_w * 12.0).round();
+                let project_bar_w = (cell_w * 36.0).round();
 
                 if (x as f32) < project_bar_w {
                     // Right-click on project sidebar → rename project
@@ -1260,7 +1260,7 @@ impl KovaWindow {
         let viewport_w = size.width as f32;
         let viewport_h = size.height as f32;
         let (cell_w, cell_h) = self.renderer.cell_size();
-        let project_bar_w = (cell_w * 12.0).round();
+        let project_bar_w = (cell_w * 36.0).round();
         let tab_bar_h = if self.is_grid_view() { 0.0 } else { (cell_h * 2.0).round() };
         let global_bar_h = cell_h;
         let bars_h = tab_bar_h;
@@ -1301,7 +1301,7 @@ impl KovaWindow {
     /// Convert logical mouse position to terminal grid (col, abs_line) for a pane.
     fn mouse_to_grid(&self, x: f32, y: f32, vp: &PaneViewport, pane: &Pane) -> (u16, usize) {
         let (cell_w, cell_h) = self.renderer.cell_size();
-        let project_bar_w = (cell_w * 12.0).round();
+        let project_bar_w = (cell_w * 36.0).round();
         let bars_h = {
             let tab_bar_h = if self.is_grid_view() { 0.0 } else { (cell_h * 2.0).round() };
             tab_bar_h
@@ -1369,7 +1369,7 @@ impl KovaWindow {
         }
 
         let (cell_w, cell_h) = self.renderer.cell_size();
-        let project_bar_w = (cell_w * 12.0).round();
+        let project_bar_w = (cell_w * 36.0).round();
         let tab_bar_h = if self.is_grid_view() { 0.0 } else { (cell_h * 2.0).round() };
         let global_bar_h = cell_h;
         let status_bar_h = if self.renderer.status_bar_enabled() {
@@ -1598,7 +1598,7 @@ impl KovaWindow {
 
         let size = self.window.inner_size();
         let (cell_w, cell_h) = self.renderer.cell_size();
-        let project_bar_w = (cell_w * 12.0).round();
+        let project_bar_w = (cell_w * 36.0).round();
         let tab_bar_h = (cell_h * 2.0).round();
         let global_bar_h = cell_h;
         let bars_h = tab_bar_h;
@@ -1617,7 +1617,7 @@ impl KovaWindow {
     fn do_swap_pane(&mut self, dir: NavDirection) {
         let size = self.window.inner_size();
         let (cell_w, cell_h) = self.renderer.cell_size();
-        let project_bar_w = (cell_w * 12.0).round();
+        let project_bar_w = (cell_w * 36.0).round();
         let proj = match self.projects.get(self.active_project) {
             Some(p) => p,
             None => return,
