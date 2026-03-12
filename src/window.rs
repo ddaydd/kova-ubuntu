@@ -485,7 +485,7 @@ impl KovaWindow {
             (1, 1)
         } else {
             let ratio = pane_area_w / pane_area_h;
-            let cols = (((tab_count as f32) * ratio).sqrt()).round() as usize;
+            let cols = ((tab_count as f32) * ratio).sqrt() as usize;
             let cols = cols.max(1).min(tab_count);
             let rows = (tab_count + cols - 1) / cols;
             (cols, rows)
@@ -1276,7 +1276,7 @@ impl KovaWindow {
             (1usize, 1usize)
         } else {
             let ratio = pane_area_w / pane_area_h;
-            let cols = (((tab_count as f32) * ratio).sqrt()).round() as usize;
+            let cols = ((tab_count as f32) * ratio).sqrt() as usize;
             let cols = cols.max(1).min(tab_count);
             let rows = (tab_count + cols - 1) / cols;
             (cols, rows)
@@ -1392,7 +1392,7 @@ impl KovaWindow {
             (1, 1)
         } else {
             let ratio = pane_area_w / pane_area_h;
-            let cols = (((tab_count as f32) * ratio).sqrt()).round() as usize;
+            let cols = ((tab_count as f32) * ratio).sqrt() as usize;
             let cols = cols.max(1).min(tab_count);
             let rows = (tab_count + cols - 1) / cols;
             (cols, rows)

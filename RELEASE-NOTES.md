@@ -2,6 +2,10 @@
 
 ## v1.6.0 — 2026-03-12
 
+### Fix grille : 4 panes en 2x2 au lieu de 3+1
+- L'algorithme Termix utilisait `.round()` sur le nombre de colonnes, ce qui arrondissait vers le haut (ex: `sqrt(4*1.78) = 2.67 → 3 cols`)
+- Remplacé par un floor implicite (`as usize`) : 4 panes donne maintenant correctement 2x2
+
 ### Project sidebar (barre latérale gauche)
 - La barre de projets passe du haut de la fenêtre à une sidebar verticale à gauche
 - Largeur fixe de 12 cellules, hauteur pleine fenêtre (hors status bar)
