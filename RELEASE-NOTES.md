@@ -2,6 +2,16 @@
 
 ## v1.6.0 — 2026-03-12
 
+### Notifications améliorées
+- Toast in-app pour BEL (visible même en fullscreen)
+- `--urgency=critical` sur les `notify-send` (BEL + command completion)
+- Son de notification via `canberra-gtk-play` : son `bell` pour BEL, son `complete` pour command completion
+
+### Extension GNOME fullscreen-notifications
+- Extension GNOME locale (`~/.local/share/gnome-shell/extensions/fullscreen-notifications@kova/`)
+- Patche `_updateState` de messageTray pour afficher les notifications même en fullscreen
+- Compatible GNOME Shell 46
+
 ### Fix grille : 4 panes en 2x2 au lieu de 3+1
 - L'algorithme Termix utilisait `.round()` sur le nombre de colonnes, ce qui arrondissait vers le haut (ex: `sqrt(4*1.78) = 2.67 → 3 cols`)
 - Remplacé par un floor implicite (`as usize`) : 4 panes donne maintenant correctement 2x2

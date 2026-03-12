@@ -393,9 +393,14 @@ impl KovaWindow {
             self.notify_cooldown = self.config.terminal.fps * 5; // 5s cooldown
             log::info!("Sending notify-send for bell");
             std::process::Command::new("notify-send")
-                .args(["--app-name=Kova", "-i", "utilities-terminal", "Kova", "Bell received"])
+                .args(["--urgency=critical", "--app-name=Kova", "-i", "utilities-terminal", "Kova", "Bell received"])
                 .spawn()
                 .ok();
+            std::process::Command::new("canberra-gtk-play")
+                .args(["-i", "bell"])
+                .spawn()
+                .ok();
+            self.show_toast("Bell received");
         }
 
         // Check command completions (OSC 133 shell integration)
@@ -421,7 +426,11 @@ impl KovaWindow {
             if let Some(msg) = notify_msg {
                 log::info!("Command completion: {}", msg);
                 std::process::Command::new("notify-send")
-                    .args(["--app-name=Kova", "-i", "utilities-terminal", "Kova", &msg])
+                    .args(["--urgency=critical", "--app-name=Kova", "-i", "utilities-terminal", "Kova", &msg])
+                    .spawn()
+                    .ok();
+                std::process::Command::new("canberra-gtk-play")
+                    .args(["-i", "complete"])
                     .spawn()
                     .ok();
                 self.show_toast(&msg);
