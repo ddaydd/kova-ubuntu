@@ -470,17 +470,14 @@ impl Renderer {
             }
         }
 
-        // Project bar
-        let project_bar_h = if !project_titles.is_empty() {
-            self.build_project_bar_vertices(&mut all_vertices, viewport_w, project_titles);
-            (self.atlas.cell_height * 1.5).round()
-        } else {
-            0.0
-        };
+        // Project sidebar
+        if !project_titles.is_empty() {
+            self.build_project_sidebar_vertices(&mut all_vertices, viewport_h, project_titles);
+        }
 
-        // Tab bar (offset by project bar height)
+        // Tab bar (to the right of sidebar)
         if !tab_titles.is_empty() {
-            self.build_tab_bar_vertices(&mut all_vertices, viewport_w, tab_titles, tab_bar_left_inset, project_bar_h);
+            self.build_tab_bar_vertices(&mut all_vertices, viewport_w, tab_titles, tab_bar_left_inset, 0.0);
         }
 
         // Global status bar
@@ -849,10 +846,13 @@ impl Renderer {
         }
     }
 
-    fn build_project_bar_vertices(&mut self, vertices: &mut Vec<Vertex>, viewport_w: f32, project_titles: &[(String, bool)]) {
+    fn build_project_sidebar_vertices(&mut self, vertices: &mut Vec<Vertex>, viewport_h: f32, project_titles: &[(String, bool)]) {
         let cell_w = self.atlas.cell_width;
         let cell_h = self.atlas.cell_height;
-        let bar_h = (cell_h * 1.5).round();
+        let sidebar_w = (cell_w * 12.0).round();
+        let row_h = (cell_h * 1.5).round();
+        let global_bar_h = cell_h;
+        let sidebar_h = viewport_h - global_bar_h;
         let no_bg = [0.0, 0.0, 0.0, 0.0];
 
         // Slightly darker than tab bar
@@ -861,20 +861,17 @@ impl Renderer {
             (self.tab_bar_bg[1] * 0.8).min(1.0),
             (self.tab_bar_bg[2] * 0.8).min(1.0),
         ];
-        Self::push_bg_quad(vertices, 0.0, 0.0, viewport_w, bar_h, bar_bg);
-
-        let max_proj_w = cell_w * 20.0;
-        // +1 for the "+" button slot
-        let proj_width = (viewport_w / (project_titles.len() + 1) as f32).min(max_proj_w);
+        Self::push_bg_quad(vertices, 0.0, 0.0, sidebar_w, sidebar_h, bar_bg);
 
         for (i, (name, is_active)) in project_titles.iter().enumerate() {
-            let x = i as f32 * proj_width;
+            let y = i as f32 * row_h;
+            if y >= sidebar_h { break; }
 
             if *is_active {
-                Self::push_bg_quad(vertices, x, 0.0, proj_width, bar_h, self.tab_bar_active_bg);
-                // Bottom accent
-                let accent_h = 3.0_f32;
-                Self::push_bg_quad(vertices, x, bar_h - accent_h, proj_width, accent_h, [0.4, 0.7, 0.5]);
+                Self::push_bg_quad(vertices, 0.0, y, sidebar_w, row_h, self.tab_bar_active_bg);
+                // Right accent
+                let accent_w = 3.0_f32;
+                Self::push_bg_quad(vertices, sidebar_w - accent_w, y, accent_w, row_h, [0.4, 0.7, 0.5]);
             }
 
             let fg = if *is_active {
@@ -884,18 +881,20 @@ impl Renderer {
             };
 
             let text_w = name.chars().count() as f32 * cell_w;
-            let text_x = x + (proj_width - text_w) / 2.0;
-            let text_y = (bar_h - cell_h) / 2.0;
-            let max_x = x + proj_width - cell_w * 0.5;
-            self.render_status_text(vertices, name, text_x.max(x + cell_w * 0.5), text_y, max_x, fg, no_bg);
+            let text_x = (sidebar_w - text_w) / 2.0;
+            let text_y = y + (row_h - cell_h) / 2.0;
+            let max_x = sidebar_w - cell_w * 0.5;
+            self.render_status_text(vertices, name, text_x.max(cell_w * 0.5), text_y, max_x, fg, no_bg);
         }
 
         // "+" button
-        let plus_x = project_titles.len() as f32 * proj_width;
-        let plus_fg = [self.tab_bar_fg[0], self.tab_bar_fg[1], self.tab_bar_fg[2], 0.5];
-        let plus_text_x = plus_x + (proj_width - cell_w) / 2.0;
-        let plus_text_y = (bar_h - cell_h) / 2.0;
-        self.render_status_text(vertices, "+", plus_text_x, plus_text_y, plus_x + proj_width, plus_fg, no_bg);
+        let plus_y = project_titles.len() as f32 * row_h;
+        if plus_y < sidebar_h {
+            let plus_fg = [self.tab_bar_fg[0], self.tab_bar_fg[1], self.tab_bar_fg[2], 0.5];
+            let plus_text_x = (sidebar_w - cell_w) / 2.0;
+            let plus_text_y = plus_y + (row_h - cell_h) / 2.0;
+            self.render_status_text(vertices, "+", plus_text_x, plus_text_y, sidebar_w, plus_fg, no_bg);
+        }
     }
 
     fn build_tab_bar_vertices(&mut self, vertices: &mut Vec<Vertex>, viewport_w: f32, tab_titles: &[(String, bool, Option<usize>, bool, bool)], left_inset: f32, y_offset: f32) {
@@ -904,7 +903,7 @@ impl Renderer {
         let bar_h = (cell_h * 2.0).round();
         let tab_count = tab_titles.len();
 
-        Self::push_bg_quad(vertices, 0.0, y_offset, viewport_w, bar_h, self.tab_bar_bg);
+        Self::push_bg_quad(vertices, left_inset, y_offset, viewport_w - left_inset, bar_h, self.tab_bar_bg);
 
         let max_tab_w = cell_w * 20.0;
         let full_available_w = viewport_w - left_inset;

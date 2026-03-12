@@ -457,12 +457,13 @@ impl KovaWindow {
             return;
         }
 
-        let (_, cell_h) = self.renderer.cell_size();
-        let project_bar_h = (cell_h * 1.5).round();
+        let (cell_w, cell_h) = self.renderer.cell_size();
+        let project_bar_w = (cell_w * 12.0).round();
         let tab_bar_h = if self.is_grid_view() { 0.0 } else { (cell_h * 2.0).round() };
         let global_bar_h = cell_h;
-        let bars_h = project_bar_h + tab_bar_h;
+        let bars_h = tab_bar_h;
         let pane_area_y = bars_h;
+        let pane_area_w = viewport_w - project_bar_w;
         let pane_area_h = viewport_h - bars_h - global_bar_h;
 
         // Collect tabs based on view mode
@@ -483,7 +484,7 @@ impl KovaWindow {
         let (grid_cols, grid_rows) = if tab_count <= 1 {
             (1, 1)
         } else {
-            let ratio = viewport_w / pane_area_h;
+            let ratio = pane_area_w / pane_area_h;
             let cols = (((tab_count as f32) * ratio).sqrt()).round() as usize;
             let cols = cols.max(1).min(tab_count);
             let rows = (tab_count + cols - 1) / cols;
@@ -491,7 +492,7 @@ impl KovaWindow {
         };
 
         let gap = 2.0_f32;
-        let cell_w_grid = (viewport_w - (grid_cols as f32 - 1.0) * gap) / grid_cols as f32;
+        let cell_w_grid = (pane_area_w - (grid_cols as f32 - 1.0) * gap) / grid_cols as f32;
         let cell_h_grid = (pane_area_h - (grid_rows as f32 - 1.0) * gap) / grid_rows as f32;
 
         let mut panes = Vec::new();
@@ -500,7 +501,7 @@ impl KovaWindow {
         for (tab_i, (tab, is_active_tab)) in all_tabs.iter().enumerate() {
             let col = tab_i % grid_cols;
             let row = tab_i / grid_cols;
-            let cell_x = col as f32 * (cell_w_grid + gap);
+            let cell_x = project_bar_w + col as f32 * (cell_w_grid + gap);
             let cell_y = pane_area_y + row as f32 * (cell_h_grid + gap);
 
             let tab_vp = PaneViewport {
@@ -602,7 +603,7 @@ impl KovaWindow {
             filter_data.as_ref(),
             self.show_help,
             self.help_hint_frames,
-            0.0,
+            project_bar_w,
             0,
             0,
             drag_ref,
@@ -951,27 +952,21 @@ impl KovaWindow {
                     return WindowAction::None;
                 }
 
-                let project_bar_h = (cell_h * 1.5).round();
+                let project_bar_w = (cell_w * 12.0).round();
                 let tab_bar_h = (cell_h * 2.0).round();
-                let viewport_h = self.surface_config.height as f32;
 
-                if (y as f32) < project_bar_h {
-                    // Click in project bar
-                    let viewport_w = self.surface_config.width as f64;
-                    let max_proj_w = cell_w as f64 * 20.0;
+                if (x as f32) < project_bar_w {
+                    // Click in project sidebar
+                    let row_h = (cell_h * 1.5).round() as f64;
                     let has_filter_tabs = self.projects.len() >= 2;
                     let has_claude = self.has_any_claude_pane();
-                    // Filter slots: [All] [Claude] [Terminal] (Claude+Terminal only if claude panes exist)
                     let filter_count: usize = if has_filter_tabs {
                         if has_claude { 3 } else { 1 }
                     } else {
                         0
                     };
-                    let slot_count = filter_count + self.projects.len() + 1;
-                    let proj_width = (viewport_w / slot_count as f64).min(max_proj_w);
-                    let clicked = (x / proj_width) as usize;
+                    let clicked = (y / row_h) as usize;
                     if has_filter_tabs && clicked < filter_count {
-                        // Clicked a filter tab
                         let filter_modes = if has_claude {
                             vec![ViewMode::All, ViewMode::Claude, ViewMode::Terminal]
                         } else {
@@ -985,27 +980,27 @@ impl KovaWindow {
                         };
                         self.resize_all_panes();
                     } else if clicked >= filter_count && clicked < filter_count + self.projects.len() {
-                        // Switch to specific project
                         self.view_mode = ViewMode::Project;
                         self.active_project = clicked - filter_count;
                         self.resize_all_panes();
-                    } else {
-                        // "+" button
+                    } else if clicked == filter_count + self.projects.len() {
                         self.do_new_project();
                     }
-                } else if !self.is_grid_view() && (y as f32) < project_bar_h + tab_bar_h {
-                    // Click in tab bar (not visible in show_all mode)
+                } else if !self.is_grid_view() && (y as f32) < tab_bar_h {
+                    // Click in tab bar
                     let viewport_w = self.surface_config.width as f64;
                     let max_tab_w = cell_w as f64 * 20.0;
+                    let project_bar_w_f64 = project_bar_w as f64;
                     let tab_count = self.project().tabs.len();
-                    let tab_width = (viewport_w / (tab_count + 1) as f64).min(max_tab_w);
+                    let available_w = viewport_w - project_bar_w_f64;
+                    let tab_width = (available_w / (tab_count + 1) as f64).min(max_tab_w);
+                    let rel_x = x - project_bar_w_f64;
                     let plus_x = tab_count as f64 * tab_width;
-                    if x >= plus_x && x < plus_x + tab_width {
+                    if rel_x >= plus_x && rel_x < plus_x + tab_width {
                         self.do_new_tab();
                     } else {
-                        let clicked_tab = (x / tab_width) as usize;
+                        let clicked_tab = (rel_x / tab_width) as usize;
                         if clicked_tab < tab_count {
-                            // Start potential drag
                             self.drag = Some(DragState {
                                 src_project: self.active_project,
                                 src_tab: clicked_tab,
@@ -1013,7 +1008,6 @@ impl KovaWindow {
                                 start_x: x,
                                 start_y: y,
                             });
-                            // Switch to tab immediately
                             self.project_mut().active_tab = clicked_tab;
                             self.project_mut().tabs[clicked_tab].clear_bell();
                             self.resize_all_panes();
@@ -1065,11 +1059,10 @@ impl KovaWindow {
                         let x = self.mouse_x;
                         let y = self.mouse_y;
                         let (cell_w, cell_h) = self.renderer.cell_size();
-                        let project_bar_h = (cell_h * 1.5).round();
+                        let project_bar_w = (cell_w * 12.0).round();
 
-                        if (y as f32) < project_bar_h {
-                            let viewport_w = self.surface_config.width as f64;
-                            let max_proj_w = cell_w as f64 * 20.0;
+                        if (x as f32) < project_bar_w {
+                            let row_h = (cell_h * 1.5).round() as f64;
                             let has_filter_tabs = self.projects.len() >= 2;
                             let has_claude = self.has_any_claude_pane();
                             let filter_count: usize = if has_filter_tabs {
@@ -1077,9 +1070,7 @@ impl KovaWindow {
                             } else {
                                 0
                             };
-                            let slot_count = filter_count + self.projects.len() + 1;
-                            let proj_width = (viewport_w / slot_count as f64).min(max_proj_w);
-                            let clicked = (x / proj_width) as usize;
+                            let clicked = (y / row_h) as usize;
                             // Filter slots are not valid drop targets
                             let target_proj = if clicked >= filter_count { clicked - filter_count } else { usize::MAX };
 
@@ -1127,12 +1118,11 @@ impl KovaWindow {
                 let x = self.mouse_x;
                 let y = self.mouse_y;
                 let (cell_w, cell_h) = self.renderer.cell_size();
-                let project_bar_h = (cell_h * 1.5).round();
+                let project_bar_w = (cell_w * 12.0).round();
 
-                if (y as f32) < project_bar_h {
-                    // Right-click on project bar → rename project
-                    let viewport_w = self.surface_config.width as f64;
-                    let max_proj_w = cell_w as f64 * 20.0;
+                if (x as f32) < project_bar_w {
+                    // Right-click on project sidebar → rename project
+                    let row_h = (cell_h * 1.5).round() as f64;
                     let has_filter_tabs = self.projects.len() >= 2;
                     let has_claude = self.has_any_claude_pane();
                     let filter_count: usize = if has_filter_tabs {
@@ -1140,9 +1130,7 @@ impl KovaWindow {
                     } else {
                         0
                     };
-                    let slot_count = filter_count + self.projects.len() + 1;
-                    let proj_width = (viewport_w / slot_count as f64).min(max_proj_w);
-                    let clicked = (x / proj_width) as usize;
+                    let clicked = (y / row_h) as usize;
                     if clicked >= filter_count && clicked < filter_count + self.projects.len() {
                         let idx = clicked - filter_count;
                         let current = self.projects[idx].name();
@@ -1271,28 +1259,30 @@ impl KovaWindow {
         let size = self.window.inner_size();
         let viewport_w = size.width as f32;
         let viewport_h = size.height as f32;
-        let (_, cell_h) = self.renderer.cell_size();
-        let project_bar_h = (cell_h * 1.5).round();
+        let (cell_w, cell_h) = self.renderer.cell_size();
+        let project_bar_w = (cell_w * 12.0).round();
         let tab_bar_h = if self.is_grid_view() { 0.0 } else { (cell_h * 2.0).round() };
         let global_bar_h = cell_h;
-        let bars_h = project_bar_h + tab_bar_h;
+        let bars_h = tab_bar_h;
+        let pane_area_w = viewport_w - project_bar_w;
         let pane_area_h = viewport_h - bars_h - global_bar_h;
+        let local_x = x - project_bar_w;
         let local_y = y - bars_h;
-        if local_y < 0.0 { return None; }
+        if local_x < 0.0 || local_y < 0.0 { return None; }
 
         let tabs: Vec<&Tab> = self.visible_tabs().into_iter().map(|(t, _)| t).collect();
         let tab_count = tabs.len();
         let (grid_cols, grid_rows) = if tab_count <= 1 {
             (1usize, 1usize)
         } else {
-            let ratio = viewport_w / pane_area_h;
+            let ratio = pane_area_w / pane_area_h;
             let cols = (((tab_count as f32) * ratio).sqrt()).round() as usize;
             let cols = cols.max(1).min(tab_count);
             let rows = (tab_count + cols - 1) / cols;
             (cols, rows)
         };
         let gap = 2.0_f32;
-        let cell_w_grid = (viewport_w - (grid_cols as f32 - 1.0) * gap) / grid_cols as f32;
+        let cell_w_grid = (pane_area_w - (grid_cols as f32 - 1.0) * gap) / grid_cols as f32;
         let cell_h_grid = (pane_area_h - (grid_rows as f32 - 1.0) * gap) / grid_rows as f32;
 
         for (tab_i, tab) in tabs.iter().enumerate() {
@@ -1301,7 +1291,7 @@ impl KovaWindow {
             let cx = col as f32 * (cell_w_grid + gap);
             let cy = row as f32 * (cell_h_grid + gap);
             let tab_vp = PaneViewport { x: cx, y: cy, width: cell_w_grid, height: cell_h_grid };
-            if let Some((pane, vp)) = tab.tree.hit_test(x, local_y, tab_vp) {
+            if let Some((pane, vp)) = tab.tree.hit_test(local_x, local_y, tab_vp) {
                 return Some((pane, vp));
             }
         }
@@ -1311,12 +1301,12 @@ impl KovaWindow {
     /// Convert logical mouse position to terminal grid (col, abs_line) for a pane.
     fn mouse_to_grid(&self, x: f32, y: f32, vp: &PaneViewport, pane: &Pane) -> (u16, usize) {
         let (cell_w, cell_h) = self.renderer.cell_size();
+        let project_bar_w = (cell_w * 12.0).round();
         let bars_h = {
-            let project_bar_h = (cell_h * 1.5).round();
             let tab_bar_h = if self.is_grid_view() { 0.0 } else { (cell_h * 2.0).round() };
-            project_bar_h + tab_bar_h
+            tab_bar_h
         };
-        let ox = vp.x + crate::renderer::PANE_H_PADDING;
+        let ox = vp.x + project_bar_w + crate::renderer::PANE_H_PADDING;
         let oy = vp.y + bars_h;
         let term = pane.terminal.read();
         // Account for y_offset (content pushed down when screen isn't full)
@@ -1379,7 +1369,7 @@ impl KovaWindow {
         }
 
         let (cell_w, cell_h) = self.renderer.cell_size();
-        let project_bar_h = (cell_h * 1.5).round();
+        let project_bar_w = (cell_w * 12.0).round();
         let tab_bar_h = if self.is_grid_view() { 0.0 } else { (cell_h * 2.0).round() };
         let global_bar_h = cell_h;
         let status_bar_h = if self.renderer.status_bar_enabled() {
@@ -1387,7 +1377,8 @@ impl KovaWindow {
         } else {
             0.0
         };
-        let bars_h = project_bar_h + tab_bar_h;
+        let bars_h = tab_bar_h;
+        let pane_area_w = viewport_w - project_bar_w;
         let pane_area_h = viewport_h - bars_h - global_bar_h;
 
         // Collect tabs to resize
@@ -1400,7 +1391,7 @@ impl KovaWindow {
         let (grid_cols, grid_rows) = if tab_count <= 1 {
             (1, 1)
         } else {
-            let ratio = viewport_w / pane_area_h;
+            let ratio = pane_area_w / pane_area_h;
             let cols = (((tab_count as f32) * ratio).sqrt()).round() as usize;
             let cols = cols.max(1).min(tab_count);
             let rows = (tab_count + cols - 1) / cols;
@@ -1408,13 +1399,13 @@ impl KovaWindow {
         };
 
         let gap = 2.0_f32;
-        let cell_w_grid = (viewport_w - (grid_cols as f32 - 1.0) * gap) / grid_cols as f32;
+        let cell_w_grid = (pane_area_w - (grid_cols as f32 - 1.0) * gap) / grid_cols as f32;
         let cell_h_grid = (pane_area_h - (grid_rows as f32 - 1.0) * gap) / grid_rows as f32;
 
         for (tab_i, tab) in tabs_to_resize.iter().enumerate() {
             let col = tab_i % grid_cols;
             let row = tab_i / grid_cols;
-            let cx = col as f32 * (cell_w_grid + gap);
+            let cx = project_bar_w + col as f32 * (cell_w_grid + gap);
             let cy = bars_h + row as f32 * (cell_h_grid + gap);
 
             let tab_vp = PaneViewport {
@@ -1606,15 +1597,15 @@ impl KovaWindow {
         };
 
         let size = self.window.inner_size();
-        let (_, cell_h) = self.renderer.cell_size();
-        let project_bar_h = (cell_h * 1.5).round();
+        let (cell_w, cell_h) = self.renderer.cell_size();
+        let project_bar_w = (cell_w * 12.0).round();
         let tab_bar_h = (cell_h * 2.0).round();
         let global_bar_h = cell_h;
-        let bars_h = project_bar_h + tab_bar_h;
+        let bars_h = tab_bar_h;
         let total_vp = PaneViewport {
-            x: 0.0,
+            x: project_bar_w,
             y: bars_h,
-            width: size.width as f32,
+            width: size.width as f32 - project_bar_w,
             height: size.height as f32 - bars_h - global_bar_h,
         };
 
@@ -1625,19 +1616,19 @@ impl KovaWindow {
 
     fn do_swap_pane(&mut self, dir: NavDirection) {
         let size = self.window.inner_size();
-        let (_, cell_h) = self.renderer.cell_size();
-        let project_bar_h = (cell_h * 1.5).round();
+        let (cell_w, cell_h) = self.renderer.cell_size();
+        let project_bar_w = (cell_w * 12.0).round();
         let proj = match self.projects.get(self.active_project) {
             Some(p) => p,
             None => return,
         };
         let tab_bar_h = (cell_h * 2.0).round();
         let global_bar_h = cell_h;
-        let bars_h = project_bar_h + tab_bar_h;
+        let bars_h = tab_bar_h;
         let total_vp = PaneViewport {
-            x: 0.0,
+            x: project_bar_w,
             y: bars_h,
-            width: size.width as f32,
+            width: size.width as f32 - project_bar_w,
             height: size.height as f32 - bars_h - global_bar_h,
         };
 

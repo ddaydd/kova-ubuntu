@@ -1,5 +1,17 @@
 # Kova Linux — Release Notes
 
+## v1.6.0 — 2026-03-12
+
+### Project sidebar (barre latérale gauche)
+- La barre de projets passe du haut de la fenêtre à une sidebar verticale à gauche
+- Largeur fixe de 12 cellules, hauteur pleine fenêtre (hors status bar)
+- Filtres (All, Claude, Terminal) et projets listés verticalement
+- Accent vert sur la droite pour l'élément actif (au lieu du bas)
+- Bouton "+" en bas de la liste
+- Tab bar positionnée à droite de la sidebar (y=0)
+- Pane area démarre à `x = sidebar_w` — plus d'espace vertical gagné
+- Hit-test souris adapté : clic gauche, droit, drag & drop fonctionnent sur l'axe Y
+
 ## v1.5.0 — 2026-03-11
 
 ### Détection Claude Code et filtres project bar
