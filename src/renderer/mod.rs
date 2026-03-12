@@ -85,6 +85,7 @@ pub struct Renderer {
     pub hovered_url: Option<(usize, u16, u16)>,
     pub hovered_url_text: Option<String>,
     pub hovered_url_pane_id: Option<PaneId>,
+    reuse_vertices: Vec<Vertex>,
 }
 
 impl Renderer {
@@ -256,6 +257,7 @@ impl Renderer {
             hovered_url: None,
             hovered_url_text: None,
             hovered_url_pane_id: None,
+            reuse_vertices: Vec::new(),
         }
     }
 
@@ -419,7 +421,8 @@ impl Renderer {
         let viewport_h = output.texture.height() as f32;
 
         // Build vertices
-        let mut all_vertices = Vec::new();
+        let mut all_vertices = std::mem::take(&mut self.reuse_vertices);
+        all_vertices.clear();
         let saved_hover_text = self.hovered_url_text.clone();
         let saved_hover_pos = self.hovered_url;
         for (term, vp, shell_ready, is_focused, pane_id, custom_title) in panes {
@@ -587,6 +590,9 @@ impl Renderer {
 
         queue.submit(std::iter::once(encoder.finish()));
         output.present();
+
+        // Recycle vertex buffer for next frame
+        self.reuse_vertices = all_vertices;
     }
 
     fn build_vertices(
