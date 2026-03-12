@@ -12,6 +12,15 @@
 - Pane area démarre à `x = sidebar_w` — plus d'espace vertical gagné
 - Hit-test souris adapté : clic gauche, droit, drag & drop fonctionnent sur l'axe Y
 
+### Sidebar élargie + version label déplacé
+- Sidebar élargie de 12 à 36 cellules (noms de projets plus lisibles)
+- Menu contextuel aligné sur la nouvelle largeur
+- Label version déplacé de la tab bar vers la global bar (à gauche)
+
+### Optimisation rendu GPU
+- Réutilisation du Vec de vertices entre frames (évite une allocation par frame)
+- Préférence GPU `HighPerformance` (utilise le GPU dédié si disponible)
+
 ## v1.5.0 — 2026-03-11
 
 ### Détection Claude Code et filtres project bar
